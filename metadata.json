@@ -1,0 +1,6 @@
+{
+  "name": "Auto Bin 4x — Smart Waste Segregation Monitor",
+  "description": "Real-time Arduino Uno Web Serial telemetry dashboard, chamber counters, servo visualizer, and upgraded sketch for the Auto Bin 4x smart waste sorting system.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
