@@ -1,25 +1,29 @@
 export const ARDUINO_SKETCH_FILENAME = 'AutoBin4x_Telemetry.ino';
 
 export const ARDUINO_SKETCH_CODE = `/*
- * Auto Bin 4x — Smart Waste Segregation Telemetry Firmware
+ * Auto Bin 4x — Dual-Servo Smart Waste Segregation Telemetry Firmware
  * Compatible with Arduino Uno + Web Serial Live Dashboard (9600 baud)
  *
- * Upgraded from your original sensor & servo sketch:
- * - Preserves all original pins, timings, and active states
- * - Emits structured EVENT:<CATEGORY>|DIST:<cm>|DO:<0/1>|AO:<0-1023>|ANGLE:<deg>
- * - Supports interactive serial test commands from the web dashboard:
- *     PING | HOME | TEST_WET | TEST_METAL | TEST_DRY | TEST_SANITARY | DEMO_ON | DEMO_OFF
+ * Dual-Servo Architecture:
+ * - Servo 1 (Pin D9):  Wet / Dry Diverter (30 deg = Wet | 90 deg = Home | 120 deg = Dry Pass)
+ * - Servo 2 (Pin D10): Metal / Dry Diverter (30 deg = Dry | 90 deg = Home | 150 deg = Metal)
+ *
+ * Emits structured packets:
+ *   EVENT:<CATEGORY>|DIST:<cm>|DO:<0/1>|AO:<0-1023>|S1:<deg>|S2:<deg>
+ * Supports interactive serial test commands:
+ *   PING | HOME | TEST_WET | TEST_METAL | TEST_DRY | TEST_SANITARY | DEMO_ON | DEMO_OFF
  */
 
 #include <Servo.h>
 
-// --- Pin Definitions (Matches Your Wiring) ---
-const int TRIG_PIN       = 6;   // HC-SR04 Trig
-const int ECHO_PIN       = 7;   // HC-SR04 Echo
-const int LM393_DO_PIN   = 4;   // LM393 digital output for wet/dry check
-const int LM393_AO_PIN   = A0;  // LM393 analog output (0 - 1023)
-const int METAL_PIN      = 2;   // Metal touch sensor signal pin
-const int SERVO_PIN      = 9;   // MG996R servo signal pin
+// --- Pin Definitions ---
+const int TRIG_PIN          = 6;   // HC-SR04 Trig
+const int ECHO_PIN          = 7;   // HC-SR04 Echo
+const int LM393_DO_PIN      = 4;   // LM393 digital output for wet/dry check
+const int LM393_AO_PIN      = A0;  // LM393 analog output (0 - 1023)
+const int METAL_PIN         = 2;   // Metal touch sensor signal pin
+const int SERVO_WET_DRY_PIN = 9;   // Servo 1: Wet / Dry chute
+const int SERVO_METAL_PIN   = 10;  // Servo 2: Metal / Non-Metal chute
 
 // Optional 4th chamber input (e.g. IR / push switch for Sanitary chute)
 const bool ENABLE_4WAY_SANITARY = false;
@@ -36,14 +40,20 @@ const unsigned long COOLDOWN_MS    = 1000;  // Pause before next scan
 const int WET_ACTIVE_STATE   = LOW;   // Many LM393 modules pull DO LOW when wet
 const int METAL_ACTIVE_STATE = HIGH;  // Change to LOW if your touch sensor is active-LOW
 
-// --- Servo Angles (Adjust to match your mechanical setup) ---
-const int ANGLE_HOME      = 90;   // Neutral / center position
-const int ANGLE_WET       = 30;   // Chamber 1: Wet waste
-const int ANGLE_SANITARY  = 60;   // Chamber 4: Optional Sanitary waste
-const int ANGLE_NON_METAL = 120;  // Chamber 3: Dry (Not Wet + No Metal)
-const int ANGLE_METAL     = 150;  // Chamber 2: Metal (Not Wet + Metal)
+// --- Servo 1 Angles (Wet / Dry Stage - Pin D9) ---
+const int S1_HOME     = 90;   // Neutral / center position
+const int S1_WET      = 30;   // Divert directly to Wet chamber
+const int S1_SANITARY = 60;   // Optional 4-way Sanitary chute
+const int S1_DRY_PASS = 120;  // Route dry waste to Stage 2 (Metal sensor)
 
-Servo sorterServo;
+// --- Servo 2 Angles (Metal / Dry Stage - Pin D10) ---
+const int S2_HOME     = 90;   // Neutral / center position
+const int S2_DRY      = 30;   // Divert non-metal to Dry chamber
+const int S2_METAL    = 150;  // Divert metallic item to Metal chamber
+
+Servo wetDryServo;
+Servo metalServo;
+
 bool serialDemoMode = false;
 unsigned long lastDemoTickMs = 0;
 int demoStep = 0;
@@ -62,8 +72,16 @@ int readDistanceCm() {
   return (int)((duration * 0.0343) / 2.0);
 }
 
-void segregateAndReport(const char* eventKey, int targetAngle, int distCm, int doVal, int aoVal) {
-  // Structured telemetry packet read by the Web Serial dashboard
+void returnServosHome() {
+  wetDryServo.write(S1_HOME);
+  metalServo.write(S2_HOME);
+  Serial.print(F("SERVO:HOME:S1="));
+  Serial.print(S1_HOME);
+  Serial.print(F("|S2="));
+  Serial.println(S2_HOME);
+}
+
+void reportAndActuate(const char* eventKey, int s1Target, int s2Target, int distCm, int doVal, int aoVal) {
   Serial.print(F("EVENT:"));
   Serial.print(eventKey);
   Serial.print(F("|DIST:"));
@@ -72,15 +90,16 @@ void segregateAndReport(const char* eventKey, int targetAngle, int distCm, int d
   Serial.print(doVal);
   Serial.print(F("|AO:"));
   Serial.print(aoVal);
-  Serial.print(F("|ANGLE:"));
-  Serial.println(targetAngle);
+  Serial.print(F("|S1:"));
+  Serial.print(s1Target);
+  Serial.print(F("|S2:"));
+  Serial.println(s2Target);
 
-  sorterServo.write(targetAngle);
+  wetDryServo.write(s1Target);
+  metalServo.write(s2Target);
   delay(MOVE_HOLD_MS);
 
-  sorterServo.write(ANGLE_HOME);
-  Serial.print(F("SERVO:HOME:"));
-  Serial.println(ANGLE_HOME);
+  returnServosHome();
 }
 
 void checkSerialCommands() {
@@ -92,19 +111,25 @@ void checkSerialCommands() {
   if (cmd.length() == 0) return;
 
   if (cmd == "PING") {
-    Serial.println(F("ACK:PONG|AUTO_BIN_4X"));
+    Serial.println(F("ACK:PONG|AUTO_BIN_4X_DUAL_SERVO"));
   } else if (cmd == "HOME") {
-    sorterServo.write(ANGLE_HOME);
-    Serial.print(F("SERVO:HOME:"));
-    Serial.println(ANGLE_HOME);
+    returnServosHome();
   } else if (cmd == "TEST_WET") {
-    segregateAndReport("WET", ANGLE_WET, 6, WET_ACTIVE_STATE, 290);
+    reportAndActuate("WET", S1_WET, S2_HOME, 6, WET_ACTIVE_STATE, 290);
   } else if (cmd == "TEST_METAL") {
-    segregateAndReport("METAL", ANGLE_METAL, 5, !WET_ACTIVE_STATE, 860);
+    wetDryServo.write(S1_DRY_PASS);
+    Serial.print(F("SERVO:S1="));
+    Serial.println(S1_DRY_PASS);
+    delay(400);
+    reportAndActuate("METAL", S1_DRY_PASS, S2_METAL, 5, !WET_ACTIVE_STATE, 860);
   } else if (cmd == "TEST_DRY") {
-    segregateAndReport("DRY", ANGLE_NON_METAL, 7, !WET_ACTIVE_STATE, 910);
+    wetDryServo.write(S1_DRY_PASS);
+    Serial.print(F("SERVO:S1="));
+    Serial.println(S1_DRY_PASS);
+    delay(400);
+    reportAndActuate("DRY", S1_DRY_PASS, S2_DRY, 7, !WET_ACTIVE_STATE, 910);
   } else if (cmd == "TEST_SANITARY") {
-    segregateAndReport("SANITARY", ANGLE_SANITARY, 6, !WET_ACTIVE_STATE, 780);
+    reportAndActuate("SANITARY", S1_SANITARY, S2_HOME, 6, !WET_ACTIVE_STATE, 780);
   } else if (cmd == "DEMO_ON") {
     serialDemoMode = true;
     lastDemoTickMs = millis();
@@ -123,13 +148,13 @@ void runSerialDemoTick() {
   lastDemoTickMs = millis();
 
   if (demoStep == 0) {
-    segregateAndReport("METAL", ANGLE_METAL, 5, !WET_ACTIVE_STATE, 880);
+    reportAndActuate("METAL", S1_DRY_PASS, S2_METAL, 5, !WET_ACTIVE_STATE, 880);
   } else if (demoStep == 1) {
-    segregateAndReport("DRY", ANGLE_NON_METAL, 7, !WET_ACTIVE_STATE, 920);
+    reportAndActuate("DRY", S1_DRY_PASS, S2_DRY, 7, !WET_ACTIVE_STATE, 920);
   } else if (demoStep == 2) {
-    segregateAndReport("WET", ANGLE_WET, 6, WET_ACTIVE_STATE, 305);
+    reportAndActuate("WET", S1_WET, S2_HOME, 6, WET_ACTIVE_STATE, 305);
   } else {
-    segregateAndReport("SANITARY", ANGLE_SANITARY, 6, !WET_ACTIVE_STATE, 790);
+    reportAndActuate("SANITARY", S1_SANITARY, S2_HOME, 6, !WET_ACTIVE_STATE, 790);
   }
   demoStep = (demoStep + 1) % 4;
 }
@@ -147,11 +172,13 @@ void setup() {
     pinMode(SANITARY_PIN, INPUT_PULLUP);
   }
 
-  sorterServo.attach(SERVO_PIN);
-  sorterServo.write(ANGLE_HOME);
+  wetDryServo.attach(SERVO_WET_DRY_PIN);
+  metalServo.attach(SERVO_METAL_PIN);
+  wetDryServo.write(S1_HOME);
+  metalServo.write(S2_HOME);
   delay(500);
 
-  Serial.println(F("System ready. Waiting for object within 10 cm..."));
+  Serial.println(F("Dual-servo system ready. Waiting for object within 10 cm..."));
 }
 
 void loop() {
@@ -176,18 +203,22 @@ void loop() {
     Serial.println(analogReading);
 
     if (ENABLE_4WAY_SANITARY && digitalRead(SANITARY_PIN) == SANITARY_ACTIVE_STATE) {
-      segregateAndReport("SANITARY", ANGLE_SANITARY, distance, doReading, analogReading);
+      reportAndActuate("SANITARY", S1_SANITARY, S2_HOME, distance, doReading, analogReading);
     } else if (isWet) {
-      segregateAndReport("WET", ANGLE_WET, distance, doReading, analogReading);
+      reportAndActuate("WET", S1_WET, S2_HOME, distance, doReading, analogReading);
     } else {
+      // Stage 1 passes dry item to Stage 2 metal sensor
+      wetDryServo.write(S1_DRY_PASS);
+      Serial.print(F("SERVO:S1="));
+      Serial.println(S1_DRY_PASS);
       Serial.println(F("Not wet. Waiting before metal check..."));
       delay(METAL_WAIT_MS);
 
       bool isMetal = (digitalRead(METAL_PIN) == METAL_ACTIVE_STATE);
       if (isMetal) {
-        segregateAndReport("METAL", ANGLE_METAL, distance, doReading, analogReading);
+        reportAndActuate("METAL", S1_DRY_PASS, S2_METAL, distance, doReading, analogReading);
       } else {
-        segregateAndReport("DRY", ANGLE_NON_METAL, distance, doReading, analogReading);
+        reportAndActuate("DRY", S1_DRY_PASS, S2_DRY, distance, doReading, analogReading);
       }
     }
 
@@ -208,20 +239,25 @@ export function generateStandaloneHtml(): string {
   <title>Auto Bin 4x — Standalone Web Serial Dashboard</title>
   <style>
     :root {
-      --bg: #f8fafc;
-      --surface: #ffffff;
-      --border: #e2e8f0;
-      --text: #0f172a;
-      --muted: #64748b;
-      --metal: #d97706;
-      --dry: #059669;
-      --wet: #0284c7;
-      --sanitary: #7c3aed;
+      --bg: #060913;
+      --surface: #0b1120;
+      --border: #1e293b;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --metal: #fbbf24;
+      --dry: #34d399;
+      --wet: #38bdf8;
+      --sanitary: #a78bfa;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(ellipse 80% 50% at 50% -10%, rgba(56, 189, 248, 0.12), transparent 65%),
+        linear-gradient(to right, rgba(148, 163, 184, 0.04) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(148, 163, 184, 0.04) 1px, transparent 1px);
+      background-size: 100% 100%, 40px 40px, 40px 40px;
       color: var(--text);
       line-height: 1.5;
       padding: 24px;
@@ -237,7 +273,7 @@ export function generateStandaloneHtml(): string {
       border-bottom: 1px solid var(--border);
       margin-bottom: 20px;
     }
-    h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+    h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; color: #ffffff; }
     .sub { font-size: 13px; color: var(--muted); }
     .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
     select, button, input {
@@ -245,27 +281,30 @@ export function generateStandaloneHtml(): string {
       font-size: 13px;
       border-radius: 8px;
       border: 1px solid var(--border);
-      background: var(--surface);
+      background: #0f172a;
       color: var(--text);
       padding: 8px 14px;
       cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
     }
+    button:hover { background: #1e293b; border-color: #334155; }
+    button:active { transform: scale(0.97); }
     button.primary {
-      background: #0f172a;
-      color: #ffffff;
-      border-color: #0f172a;
+      background: #38bdf8;
+      color: #020617;
+      border-color: #38bdf8;
       font-weight: 600;
     }
-    button.primary:hover { background: #1e293b; }
+    button.primary:hover { background: #7dd3fc; }
     button.active {
-      background: #e0f2fe;
-      border-color: #7dd3fc;
-      color: #0369a1;
+      background: rgba(56, 189, 248, 0.15);
+      border-color: rgba(56, 189, 248, 0.5);
+      color: #7dd3fc;
       font-weight: 600;
     }
     .status-line {
       font-size: 13px;
-      color: var(--muted);
+      color: #7dd3fc;
       margin-bottom: 16px;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
@@ -280,6 +319,7 @@ export function generateStandaloneHtml(): string {
       border: 1px solid var(--border);
       border-radius: 10px;
       padding: 18px;
+      transition: border-color 0.25s ease, box-shadow 0.25s ease;
     }
     .card-title { font-size: 13px; font-weight: 600; color: var(--muted); }
     .card-count {
@@ -288,6 +328,7 @@ export function generateStandaloneHtml(): string {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-variant-numeric: tabular-nums;
       margin: 6px 0 4px;
+      color: #ffffff;
     }
     .card-meta { font-size: 12px; color: var(--muted); }
     .summary {
@@ -309,7 +350,7 @@ export function generateStandaloneHtml(): string {
       margin-bottom: 12px;
       gap: 8px;
     }
-    .panel-head h2 { font-size: 15px; font-weight: 600; }
+    .panel-head h2 { font-size: 15px; font-weight: 600; color: #ffffff; }
     .log-list {
       max-height: 360px;
       overflow-y: auto;
@@ -320,10 +361,11 @@ export function generateStandaloneHtml(): string {
       justify-content: space-between;
       gap: 12px;
       padding: 8px 0;
-      border-bottom: 1px solid #f1f5f9;
+      border-bottom: 1px solid rgba(30, 41, 59, 0.7);
     }
     .console {
-      background: #0f172a;
+      background: #050811;
+      border: 1px solid var(--border);
       color: #e2e8f0;
       border-radius: 8px;
       padding: 12px;
@@ -334,7 +376,7 @@ export function generateStandaloneHtml(): string {
       line-height: 1.5;
     }
     .tx-bar { display: flex; gap: 8px; margin-top: 10px; }
-    .tx-bar input { flex: 1; cursor: text; font-family: monospace; }
+    .tx-bar input { flex: 1; cursor: text; font-family: monospace; background: #050811; }
     .demo-actions { display: none; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
     .demo-actions.visible { display: flex; }
   </style>
@@ -361,10 +403,10 @@ export function generateStandaloneHtml(): string {
     <div class="status-line" id="statusLine">Status: Disconnected · Ready for USB Serial (Chrome / Edge)</div>
 
     <div class="demo-actions" id="demoActions">
-      <button type="button" onclick="simulateEvent('METAL')">+ Simulate Metal (150°)</button>
-      <button type="button" onclick="simulateEvent('DRY')">+ Simulate Dry (120°)</button>
-      <button type="button" onclick="simulateEvent('WET')">+ Simulate Wet (30°)</button>
-      <button type="button" onclick="simulateEvent('SANITARY')">+ Simulate Sanitary (60°)</button>
+      <button type="button" onclick="simulateEvent('METAL')">+ Simulate Metal (S1 120° · S2 150°)</button>
+      <button type="button" onclick="simulateEvent('DRY')">+ Simulate Dry (S1 120° · S2 30°)</button>
+      <button type="button" onclick="simulateEvent('WET')">+ Simulate Wet (S1 30°)</button>
+      <button type="button" onclick="simulateEvent('SANITARY')">+ Simulate Sanitary (S1 60°)</button>
     </div>
 
     <div class="summary">
@@ -374,9 +416,9 @@ export function generateStandaloneHtml(): string {
         <div class="card-meta" id="lastCategoryMeta">Last detected: None</div>
       </div>
       <div class="card">
-        <div class="card-title">Ultrasonic / Moisture Sensor</div>
+        <div class="card-title">Ultrasonic / Dual-Servo State</div>
         <div class="card-count" id="sensorReadout" style="font-size:24px">-- cm</div>
-        <div class="card-meta" id="moistureMeta">LM393 AO: -- · Servo: 90°</div>
+        <div class="card-meta" id="moistureMeta">AO: -- · S1: 90° · S2: 90°</div>
       </div>
     </div>
 
@@ -384,22 +426,22 @@ export function generateStandaloneHtml(): string {
       <div class="card">
         <div class="card-title" style="color:var(--metal)">Metal Segregated</div>
         <div class="card-count" id="countMETAL">0</div>
-        <div class="card-meta">Servo target: 150° · Metal Chamber</div>
+        <div class="card-meta">S1 120° · S2 150° · Metal Chamber</div>
       </div>
       <div class="card">
         <div class="card-title" style="color:var(--dry)">Dry Segregated</div>
         <div class="card-count" id="countDRY">0</div>
-        <div class="card-meta">Servo target: 120° · Dry Chamber</div>
+        <div class="card-meta">S1 120° · S2 30° · Dry Chamber</div>
       </div>
       <div class="card">
         <div class="card-title" style="color:var(--wet)">Wet Segregated</div>
         <div class="card-count" id="countWET">0</div>
-        <div class="card-meta">Servo target: 30° · Wet Chamber</div>
+        <div class="card-meta">S1 30° · S2 90° · Wet Chamber</div>
       </div>
       <div class="card">
         <div class="card-title" style="color:var(--sanitary)">Sanitary Segregated</div>
         <div class="card-count" id="countSANITARY">0</div>
-        <div class="card-meta">Servo target: 60° · Sanitary Chamber</div>
+        <div class="card-meta">S1 60° · S2 90° · Sanitary Chamber</div>
       </div>
     </div>
 
@@ -441,7 +483,8 @@ export function generateStandaloneHtml(): string {
     let demoTimer = null;
     let lastDist = null;
     let lastAo = null;
-    let lastAngle = 90;
+    let lastS1 = 90;
+    let lastS2 = 90;
 
     const connectBtn = document.getElementById('connectBtn');
     const demoBtn = document.getElementById('demoBtn');
@@ -476,16 +519,18 @@ export function generateStandaloneHtml(): string {
       document.getElementById('sensorReadout').textContent =
         lastDist !== null ? lastDist + ' cm' : '-- cm';
       document.getElementById('moistureMeta').textContent =
-        'LM393 AO: ' + (lastAo !== null ? lastAo : '--') + ' · Servo: ' + lastAngle + '°';
+        'AO: ' + (lastAo !== null ? lastAo : '--') + ' · S1: ' + lastS1 + '° · S2: ' + lastS2 + '°';
     }
 
-    function recordEvent(category, angle, sourceLabel) {
+    function recordEvent(category, s1, s2, sourceLabel) {
       counts[category]++;
-      lastAngle = angle;
+      lastS1 = s1;
+      lastS2 = s2;
       const entry = {
         time: nowTime(),
         category,
-        angle,
+        s1,
+        s2,
         dist: lastDist,
         ao: lastAo,
         source: sourceLabel
@@ -502,7 +547,7 @@ export function generateStandaloneHtml(): string {
 
       activityLog.innerHTML = events.map(e =>
         '<div class="log-row">' +
-        '<div><strong>1 ' + e.category + ' item detected & segregated</strong> &rarr; ' + chamberMap[e.category] + ' (' + e.angle + '°)</div>' +
+        '<div><strong>1 ' + e.category + ' item detected & segregated</strong> &rarr; ' + chamberMap[e.category] + ' (S1 ' + e.s1 + '° · S2 ' + e.s2 + '°)</div>' +
         '<div class="sub">' + e.time + '</div>' +
         '</div>'
       ).join('');
@@ -524,20 +569,23 @@ export function generateStandaloneHtml(): string {
       if (line.toUpperCase().startsWith('EVENT:')) {
         const parts = line.split('|');
         const ev = parts[0].split(':')[1]?.trim().toUpperCase();
-        const anglePart = parts.find(p => p.toUpperCase().startsWith('ANGLE:'));
-        const angle = anglePart ? parseInt(anglePart.split(':')[1], 10) : 90;
-        if (counts[ev] !== undefined) recordEvent(ev, angle, 'Arduino');
+        const s1Part = parts.find(p => p.toUpperCase().startsWith('S1:'));
+        const s2Part = parts.find(p => p.toUpperCase().startsWith('S2:'));
+        const s1 = s1Part ? parseInt(s1Part.split(':')[1], 10) : (ev === 'WET' ? 30 : 120);
+        const s2 = s2Part ? parseInt(s2Part.split(':')[1], 10) : (ev === 'METAL' ? 150 : ev === 'DRY' ? 30 : 90);
+        if (counts[ev] !== undefined) recordEvent(ev, s1, s2, 'Arduino');
         return;
       }
 
       if (/Action:\\s*WET/i.test(line)) {
-        recordEvent('WET', 30, 'Arduino');
+        recordEvent('WET', 30, 90, 'Arduino');
       } else if (/Action:\\s*NOT WET \\+ METAL/i.test(line)) {
-        recordEvent('METAL', 150, 'Arduino');
+        recordEvent('METAL', 120, 150, 'Arduino');
       } else if (/Action:\\s*NOT WET \\+ NO METAL/i.test(line)) {
-        recordEvent('DRY', 120, 'Arduino');
+        recordEvent('DRY', 120, 30, 'Arduino');
       } else if (/Returning servo to Home/i.test(line) || /SERVO:HOME/i.test(line)) {
-        lastAngle = 90;
+        lastS1 = 90;
+        lastS2 = 90;
         updateUi(null);
       }
     }
@@ -600,10 +648,16 @@ export function generateStandaloneHtml(): string {
     }
 
     function simulateEvent(cat) {
-      const angles = { METAL: 150, DRY: 120, WET: 30, SANITARY: 60 };
+      const routes = {
+        METAL: { s1: 120, s2: 150 },
+        DRY: { s1: 120, s2: 30 },
+        WET: { s1: 30, s2: 90 },
+        SANITARY: { s1: 60, s2: 90 }
+      };
       lastDist = 4 + Math.floor(Math.random() * 5);
       lastAo = cat === 'WET' ? 280 + Math.floor(Math.random() * 90) : 820 + Math.floor(Math.random() * 140);
-      const line = 'EVENT:' + cat + '|DIST:' + lastDist + '|DO:' + (cat === 'WET' ? 0 : 1) + '|AO:' + lastAo + '|ANGLE:' + angles[cat];
+      const r = routes[cat];
+      const line = 'EVENT:' + cat + '|DIST:' + lastDist + '|DO:' + (cat === 'WET' ? 0 : 1) + '|AO:' + lastAo + '|S1:' + r.s1 + '|S2:' + r.s2;
       parseLine(line);
     }
 
@@ -621,7 +675,7 @@ export function generateStandaloneHtml(): string {
         demoBtn.textContent = 'Demo Mode: Active';
         demoBtn.classList.add('active');
         demoActions.classList.add('visible');
-        statusLine.textContent = 'Status: Demo Stream Active (simulated Arduino events)';
+        statusLine.textContent = 'Status: Demo Stream Active (simulated dual-servo events)';
         demoTimer = setInterval(() => {
           simulateEvent(cats[i % cats.length]);
           i++;
@@ -648,8 +702,8 @@ export function generateStandaloneHtml(): string {
 
     function exportCsv() {
       if (!events.length) return;
-      const rows = ['Time,Category,ServoAngle,DistanceCm,MoistureAO,Source',
-        ...events.map(e => [e.time, e.category, e.angle, e.dist ?? '', e.ao ?? '', e.source].join(','))
+      const rows = ['Time,Category,Servo1Angle,Servo2Angle,DistanceCm,MoistureAO,Source',
+        ...events.map(e => [e.time, e.category, e.s1, e.s2, e.dist ?? '', e.ao ?? '', e.source].join(','))
       ].join('\\n');
       const blob = new Blob([rows], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);

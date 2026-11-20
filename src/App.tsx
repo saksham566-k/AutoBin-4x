@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   CATEGORY_META,
   ChamberCounts,
@@ -38,7 +39,8 @@ const INITIAL_SNAPSHOT: HardwareSnapshot = {
   wetDigital: null,
   wetAnalog: null,
   metalDetected: false,
-  servoAngle: 90,
+  servo1Angle: 90,
+  servo2Angle: 90,
   stage: 'IDLE',
   lastCategory: null,
   lastEventTimestamp: null,
@@ -135,7 +137,8 @@ export default function App() {
           wetAnalog: parsed.wetAnalog !== undefined ? parsed.wetAnalog : prev.wetAnalog,
           metalDetected:
             parsed.metalDetected !== undefined ? parsed.metalDetected : prev.metalDetected,
-          servoAngle: parsed.servoAngle !== undefined ? parsed.servoAngle : prev.servoAngle,
+          servo1Angle: parsed.servo1Angle !== undefined ? parsed.servo1Angle : prev.servo1Angle,
+          servo2Angle: parsed.servo2Angle !== undefined ? parsed.servo2Angle : prev.servo2Angle,
           stage: parsed.stage !== undefined ? parsed.stage : prev.stage,
         };
 
@@ -149,7 +152,8 @@ export default function App() {
       if (parsed.eventCategory) {
         const cat = parsed.eventCategory;
         const meta = CATEGORY_META[cat];
-        const angle = parsed.servoAngle ?? meta.defaultAngle;
+        const s1Angle = parsed.servo1Angle ?? meta.servo1Target;
+        const s2Angle = parsed.servo2Angle ?? meta.servo2Target;
         const nowStr = formatClockTime();
 
         if (cat === 'SANITARY') {
@@ -172,7 +176,8 @@ export default function App() {
           id: makeId(),
           category: cat,
           chamberLabel: meta.chamberName,
-          servoAngle: angle,
+          servo1Angle: s1Angle,
+          servo2Angle: s2Angle,
           distanceCm: distVal,
           wetDigital: doVal,
           wetAnalog: aoVal,
@@ -184,7 +189,7 @@ export default function App() {
 
         setEvents((prev) => [newEvent, ...prev.slice(0, 199)]);
         setLatestAlertText(
-          `1 ${meta.label} item detected & segregated -> ${meta.chamberName} (${angle}°) at ${nowStr}`
+          `1 ${meta.label} item detected & segregated -> ${meta.chamberName} (S1 ${s1Angle}° · S2 ${s2Angle}°) at ${nowStr}`
         );
         triggerFlash(cat);
       }
@@ -200,36 +205,36 @@ export default function App() {
       const aoVal = isWet
         ? 240 + Math.floor(Math.random() * 110)
         : 810 + Math.floor(Math.random() * 150);
-      const angle = CATEGORY_META[category].defaultAngle;
+      const meta = CATEGORY_META[category];
+      const s1 = meta.servo1Target;
+      const s2 = meta.servo2Target;
 
-      // Step 1: Object detected
       handleIncomingLine(`SENSOR:DIST=${dist}`, 'demo');
 
-      // Step 2: Moisture reading
       const t1 = window.setTimeout(() => {
         handleIncomingLine(`LM393 DO: ${doVal} | AO: ${aoVal}`, 'demo');
+        if (category === 'METAL' || category === 'DRY') {
+          handleIncomingLine(`SERVO:S1=${s1}`, 'demo');
+        }
       }, 280);
 
-      // Step 3: Event emission + servo rotation
       const t2 = window.setTimeout(() => {
         handleIncomingLine(
-          `EVENT:${category}|DIST:${dist}|DO:${doVal}|AO:${aoVal}|ANGLE:${angle}`,
+          `EVENT:${category}|DIST:${dist}|DO:${doVal}|AO:${aoVal}|S1:${s1}|S2:${s2}`,
           'demo'
         );
-      }, 650);
+      }, 850);
 
-      // Step 4: Return servo to home
       const t3 = window.setTimeout(() => {
-        handleIncomingLine('SERVO:HOME:90', 'demo');
+        handleIncomingLine('SERVO:HOME:S1=90|S2=90', 'demo');
         handleIncomingLine('Ready for next object...', 'demo');
-      }, 1750);
+      }, 2050);
 
       demoTimersRef.current.push(t1, t2, t3);
     },
     [handleIncomingLine]
   );
 
-  // Automatic Demo Stream Loop
   useEffect(() => {
     if (!demoMode) {
       demoTimersRef.current.forEach((id) => window.clearTimeout(id));
@@ -433,7 +438,7 @@ export default function App() {
       } else if (upper === 'TEST_SANITARY') {
         runSimulatedCycle('SANITARY');
       } else if (upper === 'HOME') {
-        handleIncomingLine('SERVO:HOME:90', 'demo');
+        handleIncomingLine('SERVO:HOME:S1=90|S2=90', 'demo');
       } else if (upper === 'RESET') {
         handleIncomingLine('ACK:RESET', 'demo');
       } else {
@@ -450,7 +455,8 @@ export default function App() {
       ...prev,
       lastCategory: null,
       lastEventTimestamp: null,
-      servoAngle: 90,
+      servo1Angle: 90,
+      servo2Angle: 90,
       stage: 'IDLE',
     }));
     appendSerialLog('sys', 'Counters and activity log reset.');
@@ -461,13 +467,15 @@ export default function App() {
 
   const handleExportCsv = () => {
     if (events.length === 0) return;
-    const header = 'Time,Category,Chamber,ServoAngleDeg,DistanceCm,MoistureDO,MoistureAO,Source';
+    const header =
+      'Time,Category,Chamber,Servo1AngleDeg,Servo2AngleDeg,DistanceCm,MoistureDO,MoistureAO,Source';
     const rows = events.map((ev) =>
       [
         ev.timestamp,
         ev.category,
         ev.chamberLabel,
-        ev.servoAngle,
+        ev.servo1Angle,
+        ev.servo2Angle,
         ev.distanceCm ?? '',
         ev.wetDigital ?? '',
         ev.wetAnalog ?? '',
@@ -498,9 +506,9 @@ export default function App() {
   const isStreaming = connectionState === 'connected' || demoMode;
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
+    <div className="min-h-screen bg-[#060913] telemetry-grid-bg text-slate-100 flex flex-col">
       {/* Strict 3-Zone Top Bar */}
-      <header className="sticky top-0 z-30 h-14 bg-white border-b border-slate-200 px-4 sm:px-6">
+      <header className="sticky top-0 z-30 h-14 bg-[#060913]/85 backdrop-blur-md border-b border-slate-800/90 px-4 sm:px-6">
         <div className="max-w-7xl mx-auto h-full flex items-center justify-between gap-8">
           {/* Zone 1: Single-line Brand Wordmark */}
           <a
@@ -509,12 +517,12 @@ export default function App() {
               e.preventDefault();
               setActiveTab('monitor');
             }}
-            className="text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
+            className="text-base font-bold tracking-tight text-white whitespace-nowrap shrink-0"
           >
             Auto Bin 4x
           </a>
 
-          {/* Zone 2: Clean Single-Line Nav Links */}
+          {/* Zone 2: Clean Single-Line Nav Links with Shared Spring Indicator */}
           <nav className="flex items-center gap-6 h-full overflow-x-auto">
             {(
               [
@@ -522,20 +530,28 @@ export default function App() {
                 { id: 'sketch', label: 'Arduino Sketch' },
                 { id: 'setup', label: 'Setup & Troubleshoot' },
               ] as const
-            ).map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setActiveTab(tab.id)}
-                className={`h-full inline-flex items-center text-sm font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                  activeTab === tab.id
-                    ? 'border-slate-900 text-slate-900'
-                    : 'border-transparent text-slate-500 hover:text-slate-900'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
+            ).map((tab) => {
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`relative h-full inline-flex items-center text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    isActive ? 'text-white' : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {tab.label}
+                  {isActive && (
+                    <motion.span
+                      layoutId="top-nav-underline"
+                      transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                      className="absolute bottom-0 left-0 right-0 h-0.5 bg-sky-400 rounded-full"
+                    />
+                  )}
+                </button>
+              );
+            })}
           </nav>
 
           {/* Zone 3: 1 Primary CTA */}
@@ -544,10 +560,10 @@ export default function App() {
               type="button"
               onClick={connectArduino}
               disabled={connectionState === 'connecting'}
-              className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg transition-all active:scale-95 whitespace-nowrap shrink-0 cursor-pointer ${
                 connectionState === 'connected'
-                  ? 'bg-rose-600 text-white hover:bg-rose-700'
-                  : 'bg-slate-900 text-white hover:bg-slate-800'
+                  ? 'bg-rose-500 text-white hover:bg-rose-600'
+                  : 'bg-sky-400 text-slate-950 hover:bg-sky-300 shadow-[0_0_20px_rgba(56,189,248,0.25)]'
               } disabled:opacity-60`}
             >
               <Usb className="w-3.5 h-3.5" />
@@ -564,40 +580,51 @@ export default function App() {
       {/* Main Content Container */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-5">
         {/* Error / Warning Banner */}
-        {errorBanner && (
-          <div
-            role="alert"
-            className="flex items-start justify-between gap-4 p-4 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-900"
-          >
-            <div className="flex items-start gap-2.5">
-              <AlertCircle className="w-4 h-4 text-rose-700 shrink-0 mt-0.5" />
-              <span>{errorBanner}</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setErrorBanner(null)}
-              className="text-xs font-medium text-rose-800 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+        <AnimatePresence>
+          {errorBanner && (
+            <motion.div
+              role="alert"
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.2 }}
+              className="flex items-start justify-between gap-4 p-4 bg-rose-500/10 border border-rose-500/35 rounded-lg text-sm text-rose-200"
             >
-              Dismiss
-            </button>
-          </div>
-        )}
+              <div className="flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <span>{errorBanner}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setErrorBanner(null)}
+                className="text-xs font-medium text-rose-300 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {activeTab === 'monitor' && (
           <>
             {/* Workspace Control & Telemetry Toolbar */}
-            <section className="bg-white border border-slate-200 rounded-lg px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
+            <motion.section
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2 }}
+              className="bg-[#0B1120]/90 border border-slate-800/90 rounded-lg px-5 py-3.5 flex flex-wrap items-center justify-between gap-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+            >
               {/* Live Connection Status */}
               <div className="flex items-center gap-3 min-w-0">
                 <span
                   className={`text-sm font-semibold whitespace-nowrap ${
                     connectionState === 'connected'
-                      ? 'text-emerald-700'
+                      ? 'text-emerald-400'
                       : demoMode
-                      ? 'text-sky-700'
+                      ? 'text-sky-400'
                       : connectionState === 'error'
-                      ? 'text-rose-700'
-                      : 'text-slate-700'
+                      ? 'text-rose-400'
+                      : 'text-slate-300'
                   }`}
                 >
                   {isStreaming ? '● ' : '○ '}
@@ -609,7 +636,7 @@ export default function App() {
                     ? 'Serial Error'
                     : 'Disconnected'}
                 </span>
-                <span className="text-xs text-slate-500 font-mono truncate">
+                <span className="text-xs text-slate-400 font-mono truncate">
                   {demoMode ? 'Simulated 9600 baud telemetry stream' : connectionMessage}
                 </span>
               </div>
@@ -621,7 +648,7 @@ export default function App() {
                   value={baudRate}
                   disabled={connectionState === 'connected'}
                   onChange={(e) => setBaudRate(Number(e.target.value))}
-                  className="px-3 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md text-slate-800 disabled:opacity-50 cursor-pointer"
+                  className="px-3 py-1.5 text-xs font-mono bg-[#050811] border border-slate-800 rounded-md text-slate-200 disabled:opacity-50 cursor-pointer"
                 >
                   <option value={9600}>9600 baud</option>
                   <option value={38400}>38400 baud</option>
@@ -629,12 +656,12 @@ export default function App() {
                   <option value={115200}>115200 baud</option>
                 </select>
 
-                <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-md cursor-pointer select-none whitespace-nowrap shrink-0">
+                <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-300 bg-[#050811] border border-slate-800 rounded-md cursor-pointer select-none whitespace-nowrap shrink-0">
                   <input
                     type="checkbox"
                     checked={showSanitaryChamber}
                     onChange={(e) => setShowSanitaryChamber(e.target.checked)}
-                    className="rounded border-slate-300 text-slate-900"
+                    className="rounded border-slate-700 bg-slate-900 text-sky-400"
                   />
                   4-Way (Sanitary)
                 </label>
@@ -642,10 +669,10 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setDemoMode((prev) => !prev)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-all active:scale-95 whitespace-nowrap shrink-0 cursor-pointer ${
                     demoMode
-                      ? 'bg-sky-50 border-sky-300 text-sky-800 hover:bg-sky-100'
-                      : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                      ? 'bg-sky-500/15 border-sky-400/50 text-sky-300 hover:bg-sky-500/25'
+                      : 'bg-slate-800/80 border-slate-700 text-slate-200 hover:bg-slate-700'
                   }`}
                 >
                   {demoMode ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
@@ -655,7 +682,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleResetCounters}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-md hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800/80 border border-slate-700 rounded-md hover:bg-slate-700 active:scale-95 transition-all whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                   Reset Counters
@@ -664,34 +691,40 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleDownloadStandaloneHtml}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-md hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800/80 border border-slate-700 rounded-md hover:bg-slate-700 active:scale-95 transition-all whitespace-nowrap shrink-0 cursor-pointer"
                   title="Download single-file HTML/CSS/JS Web Serial dashboard"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Single-File HTML
                 </button>
               </div>
-            </section>
+            </motion.section>
 
             {/* Live Segregation Alert Strip */}
-            {latestAlertText && (
-              <div
-                aria-live="polite"
-                className="bg-white border border-slate-200 rounded-lg px-4 py-2.5 flex items-center justify-between gap-4 text-xs"
-              >
-                <div className="font-medium text-slate-800">
-                  <span className="font-mono text-slate-500 mr-2">LIVE EVENT</span>
-                  {latestAlertText}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setLatestAlertText(null)}
-                  className="text-slate-400 hover:text-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
+            <AnimatePresence>
+              {latestAlertText && (
+                <motion.div
+                  aria-live="polite"
+                  initial={{ opacity: 0, y: -6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.2 }}
+                  className="bg-sky-500/10 border border-sky-400/35 rounded-lg px-4 py-2.5 flex items-center justify-between gap-4 text-xs"
                 >
-                  Clear
-                </button>
-              </div>
-            )}
+                  <div className="font-medium text-slate-100">
+                    <span className="font-mono text-sky-400 mr-2">LIVE EVENT</span>
+                    {latestAlertText}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setLatestAlertText(null)}
+                    className="text-slate-400 hover:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* Chamber Counters & Summary KPIs */}
             <ChamberCards
