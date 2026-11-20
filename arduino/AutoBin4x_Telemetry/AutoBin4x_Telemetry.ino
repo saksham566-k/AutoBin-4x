@@ -2,14 +2,16 @@
  * Auto Bin 4x — Dual-Servo Smart Waste Segregation Telemetry Firmware
  * Compatible with Arduino Uno + Web Serial Live Dashboard (9600 baud)
  *
- * Dual-Servo Architecture:
- * - Servo 1 (Pin D9):  Wet / Dry Diverter (30 deg = Wet | 90 deg = Home | 120 deg = Dry Pass)
- * - Servo 2 (Pin D10): Metal / Dry Diverter (30 deg = Dry | 90 deg = Home | 150 deg = Metal)
- *
- * Emits structured packets:
- *   EVENT:<CATEGORY>|DIST:<cm>|DO:<0/1>|AO:<0-1023>|S1:<deg>|S2:<deg>
- * Supports interactive serial test commands:
- *   PING | HOME | TEST_WET | TEST_METAL | TEST_DRY | TEST_SANITARY | DEMO_ON | DEMO_OFF
+ * Fixes & Upgrades:
+ * 1. Ultrasonic Anti-Phantom Filter:
+ *    - Ignores 0-3 cm near-field ringing/wall reflections (MIN_DISTANCE_CM = 4)
+ *    - Uses 3-ping median filtering + 3 consecutive confirmations before triggering
+ * 2. Latched Metal Detection ("detect once -> treat as metal"):
+ *    - Continuously polls METAL_PIN every 5 ms across the entire detection & wait window
+ *    - Momentary contact (>= 5 ms) permanently latches metalLatched = true for that item
+ * 3. Dual-Servo Routing:
+ *    - Servo 1 (Pin D9):  Wet / Dry Diverter (30 deg = Wet | 90 deg = Home | 120 deg = Dry Pass)
+ *    - Servo 2 (Pin D10): Metal / Dry Diverter (30 deg = Dry | 90 deg = Home | 150 deg = Metal)
  */
 
 #include <Servo.h>
@@ -28,15 +30,17 @@ const bool ENABLE_4WAY_SANITARY = false;
 const int SANITARY_PIN          = 5;
 const int SANITARY_ACTIVE_STATE = LOW;
 
-// --- Distance & Timing Settings ---
-const int TARGET_DISTANCE_CM       = 10;    // Trigger when object is within ~10 cm
-const unsigned long METAL_WAIT_MS  = 2000;  // Wait 2 seconds before checking metal
+// --- Distance & Anti-False-Trigger Settings ---
+const int MIN_DISTANCE_CM          = 4;     // Ignore 0-3 cm phantom ringing / close reflections
+const int TARGET_DISTANCE_CM       = 12;    // Trigger when object is within 4..12 cm
+const int REQUIRED_CONFIRMATIONS   = 3;     // Must see object 3 cycles in a row to trigger
+const unsigned long METAL_WAIT_MS  = 2000;  // Window to continuously poll & latch metal touch
 const unsigned long MOVE_HOLD_MS   = 1500;  // Hold servo in target position
 const unsigned long COOLDOWN_MS    = 1000;  // Pause before next scan
 
 // --- Active States (Flip HIGH/LOW to match your sensors) ---
 const int WET_ACTIVE_STATE   = LOW;   // Many LM393 modules pull DO LOW when wet
-const int METAL_ACTIVE_STATE = HIGH;  // Change to LOW if your touch sensor is active-LOW
+const int METAL_ACTIVE_STATE = HIGH;  // Change to LOW if your touch sensor outputs LOW when touched
 
 // --- Servo 1 Angles (Wet / Dry Stage - Pin D9) ---
 const int S1_HOME     = 90;   // Neutral / center position
@@ -55,19 +59,58 @@ Servo metalServo;
 bool serialDemoMode = false;
 unsigned long lastDemoTickMs = 0;
 int demoStep = 0;
+int confirmCount = 0;
 
-int readDistanceCm() {
+int readSinglePingCm() {
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30 ms timeout
+  long duration = pulseIn(ECHO_PIN, HIGH, 25000); // 25 ms timeout (~425 cm max)
   if (duration == 0) {
     return -1;
   }
-  return (int)((duration * 0.0343) / 2.0);
+  int cm = (int)((duration * 0.0343) / 2.0);
+  if (cm < MIN_DISTANCE_CM || cm > 200) {
+    return -1; // Reject 0-3 cm phantom spikes and out-of-range noise
+  }
+  return cm;
+}
+
+// Takes 3 pings and returns the median valid reading to eliminate stray 2-3 cm spikes
+int readFilteredDistanceCm() {
+  int readings[3];
+  int validCount = 0;
+
+  for (int i = 0; i < 3; i++) {
+    int d = readSinglePingCm();
+    if (d > 0) {
+      readings[validCount++] = d;
+    }
+    delay(20);
+  }
+
+  if (validCount < 2) {
+    return -1; // Require at least 2 valid echoes out of 3 pings
+  }
+
+  if (validCount == 2) {
+    return (readings[0] + readings[1]) / 2;
+  }
+
+  // Sort 3 values to pick median
+  for (int i = 0; i < 2; i++) {
+    for (int j = i + 1; j < 3; j++) {
+      if (readings[j] < readings[i]) {
+        int tmp = readings[i];
+        readings[i] = readings[j];
+        readings[j] = tmp;
+      }
+    }
+  }
+  return readings[1];
 }
 
 void returnServosHome() {
@@ -140,6 +183,27 @@ void checkSerialCommands() {
   }
 }
 
+// Continuously polls METAL_PIN every 5 ms; latches true on even a single touch
+bool pollAndLatchMetal(unsigned long windowMs, bool alreadyLatched) {
+  bool metalLatched = alreadyLatched;
+  unsigned long startMs = millis();
+
+  while (millis() - startMs < windowMs) {
+    checkSerialCommands();
+    if (digitalRead(METAL_PIN) == METAL_ACTIVE_STATE) {
+      if (!metalLatched) {
+        metalLatched = true;
+        Serial.println(F("INFO:METAL_LATCHED"));
+      }
+      // Once metal is latched, hold briefly for chute settle then sort immediately
+      delay(300);
+      return true;
+    }
+    delay(5);
+  }
+  return metalLatched;
+}
+
 void runSerialDemoTick() {
   if (!serialDemoMode) return;
   if (millis() - lastDemoTickMs < 4000) return;
@@ -176,20 +240,40 @@ void setup() {
   metalServo.write(S2_HOME);
   delay(500);
 
-  Serial.println(F("Dual-servo system ready. Waiting for object within 10 cm..."));
+  Serial.print(F("INFO:IDLE_PINS|DO="));
+  Serial.print(digitalRead(LM393_DO_PIN));
+  Serial.print(F("|METAL="));
+  Serial.println(digitalRead(METAL_PIN));
+  Serial.println(F("Dual-servo system ready. Waiting for object within 4-12 cm..."));
 }
 
 void loop() {
   checkSerialCommands();
   runSerialDemoTick();
 
-  int distance = readDistanceCm();
+  int distance = readFilteredDistanceCm();
 
-  if (distance > 0 && distance <= TARGET_DISTANCE_CM) {
+  if (distance >= MIN_DISTANCE_CM && distance <= TARGET_DISTANCE_CM) {
+    confirmCount++;
+  } else {
+    confirmCount = 0;
+  }
+
+  if (confirmCount >= REQUIRED_CONFIRMATIONS) {
+    confirmCount = 0;
+
     Serial.print(F("SENSOR:DIST="));
     Serial.println(distance);
 
-    delay(300); // Brief settle time near sensor
+    // Latch metal even during the initial 300ms settle window
+    bool metalLatched = false;
+    unsigned long settleStart = millis();
+    while (millis() - settleStart < 300) {
+      if (digitalRead(METAL_PIN) == METAL_ACTIVE_STATE) {
+        metalLatched = true;
+      }
+      delay(5);
+    }
 
     int doReading = digitalRead(LM393_DO_PIN);
     int analogReading = analogRead(LM393_AO_PIN);
@@ -198,7 +282,9 @@ void loop() {
     Serial.print(F("LM393 DO: "));
     Serial.print(doReading);
     Serial.print(F(" | AO: "));
-    Serial.println(analogReading);
+    Serial.print(analogReading);
+    Serial.print(F(" | METAL_PIN: "));
+    Serial.println(digitalRead(METAL_PIN));
 
     if (ENABLE_4WAY_SANITARY && digitalRead(SANITARY_PIN) == SANITARY_ACTIVE_STATE) {
       reportAndActuate("SANITARY", S1_SANITARY, S2_HOME, distance, doReading, analogReading);
@@ -209,11 +295,12 @@ void loop() {
       wetDryServo.write(S1_DRY_PASS);
       Serial.print(F("SERVO:S1="));
       Serial.println(S1_DRY_PASS);
-      Serial.println(F("Not wet. Waiting before metal check..."));
-      delay(METAL_WAIT_MS);
+      Serial.println(F("Not wet. Polling metal sensor (latch enabled)..."));
 
-      bool isMetal = (digitalRead(METAL_PIN) == METAL_ACTIVE_STATE);
-      if (isMetal) {
+      // Poll continuously for 2 seconds; if touched even once, treat as METAL
+      metalLatched = pollAndLatchMetal(METAL_WAIT_MS, metalLatched);
+
+      if (metalLatched) {
         reportAndActuate("METAL", S1_DRY_PASS, S2_METAL, distance, doReading, analogReading);
       } else {
         reportAndActuate("DRY", S1_DRY_PASS, S2_DRY, distance, doReading, analogReading);
@@ -224,5 +311,5 @@ void loop() {
     Serial.println(F("Ready for next object..."));
   }
 
-  delay(100);
+  delay(40);
 }

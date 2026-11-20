@@ -12,7 +12,7 @@ export const SetupGuideView: React.FC = () => {
         { from: 'TRIG', to: 'Digital Pin D6', color: 'text-sky-400' },
         { from: 'ECHO', to: 'Digital Pin D7', color: 'text-sky-400' },
       ],
-      note: 'Detects incoming waste within 10 cm.',
+      note: 'Detects incoming waste within 4–12 cm (ignores 0–3 cm near-field noise).',
     },
     {
       module: 'LM393 Moisture / Rain Sensor',
@@ -31,7 +31,7 @@ export const SetupGuideView: React.FC = () => {
         { from: 'GND / -', to: 'Arduino GND', color: 'text-slate-400' },
         { from: 'SIG / OUT', to: 'Digital Pin D2', color: 'text-amber-400' },
       ],
-      note: 'Polled after 2s settle delay when object is dry.',
+      note: 'Continuously polled & latched on first contact for the whole cycle.',
     },
     {
       module: 'Servo 1 · Wet / Dry Diverter',
@@ -77,6 +77,16 @@ export const SetupGuideView: React.FC = () => {
   ];
 
   const troubleshootingItems = [
+    {
+      issue: 'Ultrasonic stays stuck at 2–3 cm & triggers Dry nonstop',
+      cause: 'Near-field transducer ringing, chute lip reflection within 3 cm, or single-ping noise triggers empty Dry cycles.',
+      fix: 'Firmware sets MIN_DISTANCE_CM = 4 with a 3-ping median + 3-confirmation filter. Also ensure nothing is within 4–12 cm in front of the HC-SR04.',
+    },
+    {
+      issue: 'Touching metal still routes to Dry',
+      cause: 'Momentary touch missed by a delayed single read, floating D2 pin, or sensor is active-LOW instead of active-HIGH.',
+      fix: 'Firmware latches metal on any 5 ms touch. Check INFO:IDLE_PINS|...|METAL= in Raw Serial Monitor: if METAL=1 at rest, flip METAL_ACTIVE_STATE to LOW.',
+    },
     {
       issue: '"Failed to open serial port" or port missing',
       cause: 'Arduino IDE Serial Monitor, another browser tab, or a Python/Node script is locking the COM port.',
