@@ -1,10 +1,15 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { CATEGORY_META, HardwareSnapshot } from '../types/telemetry';
+import { CATEGORY_META, ConnectionState, HardwareSnapshot } from '../types/telemetry';
+import { RefreshCw, SlidersHorizontal } from 'lucide-react';
 
 interface HardwareVisualizerProps {
   snapshot: HardwareSnapshot;
   showSanitaryChamber: boolean;
+  connectionState: ConnectionState;
+  demoMode: boolean;
+  onApplyMetalThreshold: (threshold: number) => void;
+  onRequestSensorRead: () => void;
 }
 
 interface ServoTarget {
@@ -199,7 +204,19 @@ const SingleServoDial: React.FC<SingleServoDialProps> = ({
 export const HardwareVisualizer: React.FC<HardwareVisualizerProps> = ({
   snapshot,
   showSanitaryChamber,
+  connectionState,
+  demoMode,
+  onApplyMetalThreshold,
+  onRequestSensorRead,
 }) => {
+  const [draftThreshold, setDraftThreshold] = useState<number>(snapshot.metalThreshold);
+  const [openPlateAdc, setOpenPlateAdc] = useState<number | null>(null);
+  const [bridgedPlateAdc, setBridgedPlateAdc] = useState<number | null>(null);
+
+  useEffect(() => {
+    setDraftThreshold(snapshot.metalThreshold);
+  }, [snapshot.metalThreshold]);
+
   const servo1Targets: ServoTarget[] = [
     { deg: 30, label: 'Wet', color: CATEGORY_META.WET.strokeHex },
     ...(showSanitaryChamber
@@ -235,30 +252,47 @@ export const HardwareVisualizer: React.FC<HardwareVisualizerProps> = ({
     snapshot.distanceCm !== null
       ? Math.max(0, Math.min(100, Math.round((snapshot.distanceCm / 30) * 100)))
       : 0;
-  const isWithinTrigger = snapshot.distanceCm !== null && snapshot.distanceCm <= 10;
+  const isWithinTrigger =
+    snapshot.distanceCm !== null && snapshot.distanceCm >= 4 && snapshot.distanceCm <= 12;
 
-  const moisturePct =
-    snapshot.wetAnalog !== null
-      ? Math.max(0, Math.min(100, Math.round((snapshot.wetAnalog / 1023) * 100)))
+  const metalAdcPct =
+    snapshot.metalAdc !== null
+      ? Math.max(0, Math.min(100, Math.round((snapshot.metalAdc / 1023) * 100)))
       : 0;
+  const thresholdPct = Math.max(
+    0,
+    Math.min(100, Math.round((snapshot.metalThreshold / 1023) * 100))
+  );
 
   const isSortingOrDetected =
-    isWithinTrigger || snapshot.stage === 'OBJECT_DETECTED' || snapshot.stage === 'SORTING';
+    isWithinTrigger ||
+    snapshot.stage === 'OBJECT_DETECTED' ||
+    snapshot.stage === 'CHECKING_AI' ||
+    snapshot.stage === 'CHECKING_METAL' ||
+    snapshot.stage === 'SORTING';
+
+  const isConnectedOrDemo = connectionState === 'connected' || demoMode;
+
+  const suggestedMidpoint =
+    openPlateAdc !== null && bridgedPlateAdc !== null && bridgedPlateAdc > openPlateAdc
+      ? Math.round((openPlateAdc + bridgedPlateAdc) / 2)
+      : null;
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.28, delay: 0.12 }}
-      className="bg-[#0B1120]/90 border border-slate-800/90 rounded-lg p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+      className="bg-[#0B1120]/90 border border-slate-800/90 rounded-lg p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] space-y-5"
     >
+      {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800/80">
         <div>
           <h2 className="text-base font-semibold text-white">
             Dual-Servo & Sensor Telemetry
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            HC-SR04 (D6/D7) · LM393 (D4/A0) · Metal (D2) · Servo 1 Wet/Dry (D9) · Servo 2 Metal/Dry (D10)
+            HC-SR04 (D6/D7) · WitBlox AI Vision Inputs (D4 DRY / D5 WET) · Two-Plate Metal (A1) · Servos (D9/D10)
           </p>
         </div>
         <div className="flex items-center gap-5 shrink-0 font-mono tabular-nums">
@@ -269,7 +303,7 @@ export const HardwareVisualizer: React.FC<HardwareVisualizerProps> = ({
             </div>
           </div>
           <div className="text-right">
-            <div className="text-[11px] text-slate-400">Servo 2 (Metal)</div>
+            <div className="text-[11px] text-slate-400">Servo 2 (Metal/Dry)</div>
             <div className="text-base font-bold" style={{ color: servo2Color }}>
               {snapshot.servo2Angle}°
             </div>
@@ -277,9 +311,10 @@ export const HardwareVisualizer: React.FC<HardwareVisualizerProps> = ({
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 xl:grid-cols-12 gap-5 items-center">
+      {/* Main Split: Servo Dials + Live Sensor Panels */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
         {/* Dual Servo Dials */}
-        <div className="xl:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="xl:col-span-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
           <SingleServoDial
             title="Servo 1 · Wet / Dry"
             subtitle="STAGE 1 CHUTE · PIN D9"
@@ -301,8 +336,9 @@ export const HardwareVisualizer: React.FC<HardwareVisualizerProps> = ({
           />
         </div>
 
-        {/* Sensor Telemetry Readout Bars */}
-        <div className="xl:col-span-5 space-y-4">
+        {/* Sensor Telemetry Readout Column */}
+        <div className="xl:col-span-6 space-y-4">
+          {/* HC-SR04 Ultrasonic */}
           <div>
             <div className="flex items-center justify-between text-xs mb-1.5">
               <span className="font-medium text-slate-200">
@@ -312,7 +348,7 @@ export const HardwareVisualizer: React.FC<HardwareVisualizerProps> = ({
               <span className="font-mono tabular-nums text-white font-semibold">
                 {snapshot.distanceCm !== null ? `${snapshot.distanceCm} cm` : '-- cm'}{' '}
                 <span className="font-normal text-slate-400">
-                  ({isWithinTrigger ? 'Trigger <= 10 cm' : 'Threshold 10 cm'})
+                  ({isWithinTrigger ? 'Trigger 4–12 cm' : 'Window 4–12 cm'})
                 </span>
               </span>
             </div>
@@ -326,64 +362,252 @@ export const HardwareVisualizer: React.FC<HardwareVisualizerProps> = ({
             </div>
           </div>
 
-          <div>
-            <div className="flex items-center justify-between text-xs mb-1.5">
+          {/* Two-Plate Analog Metal Sensor (A1) */}
+          <div
+            className={`border rounded-lg p-3.5 transition-colors ${
+              snapshot.stage === 'CHECKING_METAL'
+                ? 'border-amber-400/60 bg-amber-500/5'
+                : 'border-slate-800 bg-[#060913]/80'
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-2">
               <span className="font-medium text-slate-200">
-                LM393 Moisture Sensor{' '}
-                <span className="font-mono text-slate-500">DO D4 / AO A0</span>
+                Two-Plate Metal Contact{' '}
+                <span className="font-mono text-slate-500">Analog A1</span>
+                {snapshot.stage === 'CHECKING_METAL' && (
+                  <span className="ml-2 font-mono text-amber-300">· Checking Plates</span>
+                )}
               </span>
               <span className="font-mono tabular-nums text-white font-semibold">
-                AO: {snapshot.wetAnalog !== null ? snapshot.wetAnalog : '--'} / 1023 · DO:{' '}
-                {snapshot.wetDigital !== null ? snapshot.wetDigital : '--'}
+                ADC: {snapshot.metalAdc !== null ? snapshot.metalAdc : '--'} / 1023{' '}
+                <span className="font-normal text-slate-400">
+                  (Threshold {snapshot.metalThreshold})
+                </span>
               </span>
             </div>
-            <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
+
+            {/* ADC Bar with Threshold Marker */}
+            <div className="relative h-2.5 w-full bg-slate-800 rounded-full overflow-hidden">
               <motion.div
                 className={`h-full ${
-                  snapshot.wetDigital === 0 ? 'bg-sky-400' : 'bg-emerald-400'
+                  snapshot.metalLatched || snapshot.metalContact
+                    ? 'bg-amber-400'
+                    : 'bg-emerald-400'
                 }`}
                 initial={{ width: 0 }}
-                animate={{ width: `${moisturePct}%` }}
-                transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+                animate={{ width: `${metalAdcPct}%` }}
+                transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
               />
+              <div
+                className="absolute top-0 bottom-0 w-0.5 bg-white/90"
+                style={{ left: `${thresholdPct}%` }}
+                title={`Configured threshold: ${snapshot.metalThreshold}`}
+              />
+            </div>
+
+            <div className="mt-2.5 grid grid-cols-3 gap-2 text-xs font-mono tabular-nums">
+              <div>
+                <span className="text-slate-500 block text-[10px]">CONTACT NOW</span>
+                <span
+                  className={
+                    snapshot.metalContact ? 'text-amber-400 font-semibold' : 'text-slate-300'
+                  }
+                >
+                  {snapshot.metalContact ? 'Bridged' : 'Open'}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500 block text-[10px]">CYCLE LATCH</span>
+                <span
+                  className={
+                    snapshot.metalLatched ? 'text-amber-400 font-semibold' : 'text-slate-300'
+                  }
+                >
+                  {snapshot.metalLatched ? 'Latched (Metal)' : 'Cleared'}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500 block text-[10px]">THRESHOLD</span>
+                <span className="text-sky-300 font-semibold">{snapshot.metalThreshold}</span>
+              </div>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 pt-1">
-            <div className="border border-slate-800 rounded-md px-3 py-2.5 bg-[#060913]/80">
-              <div className="text-[11px] text-slate-400 font-mono">METAL PIN D2</div>
-              <div
-                className={`mt-1 text-sm font-semibold font-mono ${
-                  snapshot.metalDetected ? 'text-amber-400' : 'text-slate-200'
-                }`}
+          {/* WitBlox AI Vision Digital Inputs (Read via Arduino) */}
+          <div
+            className={`border rounded-lg p-3.5 transition-colors ${
+              snapshot.stage === 'AI_ERROR'
+                ? 'border-rose-500/50 bg-rose-500/5'
+                : snapshot.stage === 'CHECKING_AI'
+                ? 'border-sky-400/50 bg-sky-500/5'
+                : 'border-slate-800 bg-[#060913]/80'
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+              <div className="text-xs font-medium text-slate-200">
+                WitBlox AI Vision Inputs{' '}
+                <span className="text-slate-400 font-normal">(via Arduino D4 / D5)</span>
+              </div>
+              <span className="text-[11px] font-mono text-slate-400">
+                {connectionState === 'connected'
+                  ? 'Arduino Link Active'
+                  : demoMode
+                  ? 'Simulated Signals'
+                  : 'Arduino Offline'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
+              <div className="border-t border-slate-800 pt-2">
+                <div className="text-[10px] text-slate-500">DRY PIN D4</div>
+                <div
+                  className={`mt-0.5 font-semibold ${
+                    snapshot.aiDryActive ? 'text-emerald-400' : 'text-slate-300'
+                  }`}
+                >
+                  {snapshot.aiDryActive === null
+                    ? '--'
+                    : snapshot.aiDryActive
+                    ? 'Active'
+                    : 'Inactive'}
+                </div>
+              </div>
+              <div className="border-t border-slate-800 pt-2">
+                <div className="text-[10px] text-slate-500">WET PIN D5</div>
+                <div
+                  className={`mt-0.5 font-semibold ${
+                    snapshot.aiWetActive ? 'text-sky-400' : 'text-slate-300'
+                  }`}
+                >
+                  {snapshot.aiWetActive === null
+                    ? '--'
+                    : snapshot.aiWetActive
+                    ? 'Active'
+                    : 'Inactive'}
+                </div>
+              </div>
+              <div className="border-t border-slate-800 pt-2">
+                <div className="text-[10px] text-slate-500">AI CLASS</div>
+                <div
+                  className={`mt-0.5 font-semibold ${
+                    snapshot.aiClassification === 'WET'
+                      ? 'text-sky-400'
+                      : snapshot.aiClassification === 'DRY'
+                      ? 'text-emerald-400'
+                      : snapshot.aiClassification === 'CONFLICT' ||
+                        snapshot.aiClassification === 'UNKNOWN'
+                      ? 'text-rose-400'
+                      : 'text-slate-300'
+                  }`}
+                >
+                  {snapshot.aiClassification}
+                </div>
+              </div>
+              <div className="border-t border-slate-800 pt-2">
+                <div className="text-[10px] text-slate-500">VALIDITY</div>
+                <div
+                  className={`mt-0.5 font-semibold ${
+                    snapshot.aiValidity === 'VALID'
+                      ? 'text-emerald-400'
+                      : snapshot.aiValidity === 'CONFLICT' || snapshot.aiValidity === 'UNKNOWN'
+                      ? 'text-rose-400'
+                      : 'text-slate-300'
+                  }`}
+                >
+                  {snapshot.aiValidity}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Metal Plate Calibration Strip */}
+      <div className="pt-4 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
+            <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
+            <span>Two-Plate Metal Calibration (A1)</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            Capture baseline readings with plates open vs bridged by metal, then apply your threshold explicitly.
+            {openPlateAdc !== null && (
+              <span className="font-mono text-slate-300 ml-2 tabular-nums">
+                Open: {openPlateAdc}
+              </span>
+            )}
+            {bridgedPlateAdc !== null && (
+              <span className="font-mono text-amber-300 ml-2 tabular-nums">
+                Bridged: {bridgedPlateAdc}
+              </span>
+            )}
+            {suggestedMidpoint !== null && (
+              <button
+                type="button"
+                onClick={() => setDraftThreshold(suggestedMidpoint)}
+                className="ml-2 font-mono text-sky-400 hover:underline cursor-pointer"
               >
-                {snapshot.metalDetected ? 'HIGH (Metal)' : 'IDLE / LOW'}
-              </div>
-            </div>
-            <div className="border border-slate-800 rounded-md px-3 py-2.5 bg-[#060913]/80">
-              <div className="text-[11px] text-slate-400 font-mono">WET DO PIN D4</div>
-              <div
-                className={`mt-1 text-sm font-semibold font-mono ${
-                  snapshot.wetDigital === 0
-                    ? 'text-sky-400'
-                    : snapshot.wetDigital === 1
-                    ? 'text-emerald-400'
-                    : 'text-slate-200'
-                }`}
-              >
-                {snapshot.wetDigital === 0
-                  ? 'LOW (Wet)'
-                  : snapshot.wetDigital === 1
-                  ? 'HIGH (Dry)'
-                  : '--'}
-              </div>
-            </div>
-            <div className="border border-slate-800 rounded-md px-3 py-2.5 bg-[#060913]/80 col-span-2">
-              <div className="text-[11px] text-slate-400 font-mono">PIPELINE STAGE</div>
-              <div className="mt-1 text-sm font-semibold font-mono text-sky-300 truncate">
-                {snapshot.stage.replace(/_/g, ' ')}
-              </div>
-            </div>
+                Use midpoint ({suggestedMidpoint})
+              </button>
+            )}
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={!isConnectedOrDemo}
+            onClick={onRequestSensorRead}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-200 bg-slate-800/80 border border-slate-700 rounded-md hover:bg-slate-700 disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <RefreshCw className="w-3 h-3" />
+            Read A1
+          </button>
+
+          <button
+            type="button"
+            disabled={snapshot.metalAdc === null}
+            onClick={() => snapshot.metalAdc !== null && setOpenPlateAdc(snapshot.metalAdc)}
+            className="px-2.5 py-1.5 text-xs font-medium text-slate-200 bg-slate-800/80 border border-slate-700 rounded-md hover:bg-slate-700 disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
+          >
+            Capture Open
+          </button>
+
+          <button
+            type="button"
+            disabled={snapshot.metalAdc === null}
+            onClick={() => snapshot.metalAdc !== null && setBridgedPlateAdc(snapshot.metalAdc)}
+            className="px-2.5 py-1.5 text-xs font-medium text-slate-200 bg-slate-800/80 border border-slate-700 rounded-md hover:bg-slate-700 disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
+          >
+            Capture Bridged
+          </button>
+
+          <div className="flex items-center gap-2 pl-2 border-l border-slate-800">
+            <label htmlFor="metalThresholdInput" className="text-xs text-slate-400 whitespace-nowrap">
+              Threshold
+            </label>
+            <input
+              id="metalThresholdInput"
+              type="number"
+              min={50}
+              max={1000}
+              step={10}
+              value={draftThreshold}
+              onChange={(e) => {
+                const v = Number.parseInt(e.target.value, 10);
+                if (!Number.isNaN(v)) setDraftThreshold(v);
+              }}
+              className="w-20 px-2.5 py-1 text-xs font-mono tabular-nums bg-[#050811] border border-slate-700 rounded-md text-slate-100"
+            />
+            <button
+              type="button"
+              onClick={() =>
+                onApplyMetalThreshold(Math.max(50, Math.min(1000, draftThreshold || 700)))
+              }
+              className="px-3 py-1.5 text-xs font-semibold text-slate-950 bg-amber-400 rounded-md hover:bg-amber-300 active:scale-95 transition-all cursor-pointer whitespace-nowrap shrink-0"
+            >
+              Apply Threshold
+            </button>
           </div>
         </div>
       </div>

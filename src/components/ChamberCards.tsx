@@ -64,6 +64,7 @@ export const ChamberCards: React.FC<ChamberCardsProps> = ({
             {showSanitaryChamber ? '4-way sorting' : '3-way sorting'} · {counts.METAL} metal ·{' '}
             {counts.DRY} dry · {counts.WET} wet
             {showSanitaryChamber ? ` · ${counts.SANITARY} sanitary` : ''}
+            {snapshot.errorCount > 0 ? ` · ${snapshot.errorCount} AI hold` : ''}
           </div>
         </motion.div>
 
@@ -73,32 +74,42 @@ export const ChamberCards: React.FC<ChamberCardsProps> = ({
           transition={{ duration: 0.25, delay: 0.05 }}
           className="bg-[#0B1120]/90 border border-slate-800/90 rounded-lg p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
         >
-          <div className="text-xs font-medium text-slate-400">Last Detected Category</div>
+          <div className="text-xs font-medium text-slate-400">Last Segregated Category</div>
           <div className="mt-2 flex items-baseline gap-2.5">
             <AnimatePresence mode="wait" initial={false}>
               <motion.span
-                key={lastMeta ? lastMeta.id : 'none'}
+                key={snapshot.stage === 'AI_ERROR' ? 'error' : lastMeta ? lastMeta.id : 'none'}
                 initial={{ opacity: 0, x: -6 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: 6 }}
                 transition={{ duration: 0.18 }}
                 className={`text-2xl font-bold tracking-tight ${
-                  lastMeta ? lastMeta.accentText : 'text-slate-500'
+                  snapshot.stage === 'AI_ERROR'
+                    ? 'text-rose-400'
+                    : lastMeta
+                    ? lastMeta.accentText
+                    : 'text-slate-500'
                 }`}
               >
-                {lastMeta ? lastMeta.label : 'Awaiting Item'}
+                {snapshot.stage === 'AI_ERROR'
+                  ? 'AI Safe Hold'
+                  : lastMeta
+                  ? lastMeta.label
+                  : 'Awaiting Item'}
               </motion.span>
             </AnimatePresence>
-            {lastMeta && (
+            {snapshot.stage !== 'AI_ERROR' && lastMeta && (
               <span className="text-xs font-mono text-slate-400 tabular-nums">
                 {lastMeta.chamberName}
               </span>
             )}
           </div>
-          <div className="mt-2 text-xs text-slate-400 font-mono tabular-nums">
-            {snapshot.lastEventTimestamp
+          <div className="mt-2 text-xs text-slate-400 font-mono tabular-nums truncate">
+            {snapshot.stage === 'AI_ERROR' && snapshot.lastErrorReason
+              ? `Fault: ${snapshot.lastErrorReason} (servos kept at 90°)`
+              : snapshot.lastEventTimestamp
               ? `Updated ${snapshot.lastEventTimestamp}`
-              : 'No segregation events recorded yet'}
+              : 'No physical segregation events recorded yet'}
           </div>
         </motion.div>
 
@@ -108,18 +119,30 @@ export const ChamberCards: React.FC<ChamberCardsProps> = ({
           transition={{ duration: 0.25, delay: 0.1 }}
           className="bg-[#0B1120]/90 border border-slate-800/90 rounded-lg p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
         >
-          <div className="text-xs font-medium text-slate-400">Current Sensor & Dual-Servo State</div>
+          <div className="text-xs font-medium text-slate-400">
+            WitBlox AI · Metal A1 · Dual Servos
+          </div>
           <div className="mt-2 flex items-baseline gap-3">
             <span className="text-2xl font-bold font-mono tabular-nums text-white">
               {snapshot.distanceCm !== null ? `${snapshot.distanceCm} cm` : '-- cm'}
             </span>
             <span className="text-xs font-mono text-slate-400 tabular-nums">
-              S1 {snapshot.servo1Angle}° · S2 {snapshot.servo2Angle}°
+              AI {snapshot.aiClassification} · A1{' '}
+              {snapshot.metalAdc !== null ? snapshot.metalAdc : '--'} · S1 {snapshot.servo1Angle}° ·
+              S2 {snapshot.servo2Angle}°
             </span>
           </div>
           <div className="mt-2 text-xs text-slate-400">
             Stage:{' '}
-            <span className="font-mono text-sky-300">
+            <span
+              className={`font-mono ${
+                snapshot.stage === 'AI_ERROR'
+                  ? 'text-rose-400'
+                  : snapshot.stage === 'CHECKING_METAL'
+                  ? 'text-amber-300'
+                  : 'text-sky-300'
+              }`}
+            >
               {snapshot.stage.replace(/_/g, ' ')}
             </span>
           </div>
@@ -199,7 +222,9 @@ export const ChamberCards: React.FC<ChamberCardsProps> = ({
               </div>
 
               <div className="mt-3 flex items-center justify-between gap-2 pt-3 border-t border-slate-800/80">
-                <span className="text-xs text-slate-400 truncate">{meta.chamberName}</span>
+                <span className="text-xs text-slate-400 truncate" title={meta.description}>
+                  {meta.chamberName}
+                </span>
                 <button
                   type="button"
                   onClick={() => onSimulateCategory(cat)}
@@ -207,7 +232,7 @@ export const ChamberCards: React.FC<ChamberCardsProps> = ({
                   title={`Simulate 1 ${meta.label} item detection`}
                 >
                   <Plus className="w-3 h-3" />
-                  Test {meta.label}
+                  Sim {meta.label}
                 </button>
               </div>
             </motion.div>

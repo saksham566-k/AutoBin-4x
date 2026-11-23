@@ -21,6 +21,8 @@ interface ActivityAndSerialPanelProps {
   onSendCommand: (command: string) => void;
 }
 
+type EventFilter = 'ALL' | WasteCategory | 'ERROR';
+
 export const ActivityAndSerialPanel: React.FC<ActivityAndSerialPanelProps> = ({
   events,
   serialLogs,
@@ -32,7 +34,7 @@ export const ActivityAndSerialPanel: React.FC<ActivityAndSerialPanelProps> = ({
   onClearSerial,
   onSendCommand,
 }) => {
-  const [filter, setFilter] = useState<'ALL' | WasteCategory>('ALL');
+  const [filter, setFilter] = useState<EventFilter>('ALL');
   const [autoScroll, setAutoScroll] = useState(true);
   const [commandInput, setCommandInput] = useState('');
   const consoleEndRef = useRef<HTMLDivElement | null>(null);
@@ -46,12 +48,13 @@ export const ActivityAndSerialPanel: React.FC<ActivityAndSerialPanelProps> = ({
   const filteredEvents =
     filter === 'ALL' ? events : events.filter((item) => item.category === filter);
 
-  const filterOptions: Array<{ key: 'ALL' | WasteCategory; label: string }> = [
+  const filterOptions: Array<{ key: EventFilter; label: string }> = [
     { key: 'ALL', label: 'All' },
     { key: 'METAL', label: 'Metal' },
     { key: 'DRY', label: 'Dry' },
     { key: 'WET', label: 'Wet' },
     ...(showSanitaryChamber ? [{ key: 'SANITARY' as const, label: 'Sanitary' }] : []),
+    { key: 'ERROR', label: 'AI Errors' },
   ];
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -130,14 +133,22 @@ export const ActivityAndSerialPanel: React.FC<ActivityAndSerialPanelProps> = ({
                 No segregation events recorded yet
               </p>
               <p className="text-xs text-slate-500 mt-1 max-w-sm">
-                Connect your Arduino Uno via USB Serial or enable Demo Mode to watch live sorting
-                events stream into the chambers.
+                Connect your Arduino Uno via USB Serial or enable Demo Mode to watch WitBlox AI
+                classification and two-plate metal detection events stream in real time.
               </p>
             </div>
           ) : (
             <AnimatePresence initial={false}>
               {filteredEvents.map((ev) => {
-                const meta = CATEGORY_META[ev.category];
+                const isError = ev.category === 'ERROR';
+                const meta = isError ? null : CATEGORY_META[ev.category as WasteCategory];
+                const sourceText =
+                  ev.source === 'test'
+                    ? 'Hardware Test'
+                    : ev.source === 'arduino'
+                    ? 'USB Serial'
+                    : 'Simulated';
+
                 return (
                   <motion.div
                     key={ev.id}
@@ -149,15 +160,21 @@ export const ActivityAndSerialPanel: React.FC<ActivityAndSerialPanelProps> = ({
                   >
                     <div className="min-w-0">
                       <div className="font-medium text-slate-100">
-                        <span className={meta.accentText}>1 {meta.label} item</span> detected &
-                        segregated &rarr; {ev.chamberLabel}
+                        <span className={isError ? 'text-rose-400' : meta?.accentText}>
+                          {isError
+                            ? `AI Signal Error (${ev.aiClassification})`
+                            : ev.source === 'test'
+                            ? `Test ${meta?.label}`
+                            : `1 ${meta?.label} item`}
+                        </span>{' '}
+                        · {ev.resultLabel}
                       </div>
                       <div className="mt-0.5 text-xs text-slate-400 font-mono tabular-nums">
-                        S1 {ev.servo1Angle}° · S2 {ev.servo2Angle}°
-                        {ev.distanceCm !== null ? ` · Dist ${ev.distanceCm} cm` : ''}
-                        {ev.wetAnalog !== null ? ` · AO ${ev.wetAnalog}` : ''}
-                        {' · '}
-                        {ev.source === 'arduino' ? 'USB Serial' : 'Simulated'}
+                        {ev.distanceCm !== null ? `Dist ${ev.distanceCm} cm · ` : ''}
+                        AI {ev.aiClassification} ({ev.aiValidity})
+                        {ev.metalAdc !== null ? ` · A1 ${ev.metalAdc}` : ''}
+                        {` · Metal ${ev.metalDetected ? 'Yes' : 'No'}`}
+                        {` · S1 ${ev.servo1Angle}° · S2 ${ev.servo2Angle}° · ${sourceText}`}
                       </div>
                     </div>
                     <div className="text-xs font-mono tabular-nums text-slate-400 whitespace-nowrap shrink-0 pt-0.5">
@@ -235,7 +252,7 @@ export const ActivityAndSerialPanel: React.FC<ActivityAndSerialPanelProps> = ({
 
         {/* Quick TX Commands */}
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
-          {['PING', 'TEST_METAL', 'TEST_DRY', 'TEST_WET', 'HOME'].map((cmd) => (
+          {['PING', 'READ_SENSORS', 'TEST_METAL', 'TEST_DRY', 'TEST_WET', 'HOME'].map((cmd) => (
             <button
               key={cmd}
               type="button"
@@ -257,7 +274,7 @@ export const ActivityAndSerialPanel: React.FC<ActivityAndSerialPanelProps> = ({
             disabled={!canSendCommands}
             placeholder={
               canSendCommands
-                ? 'Send serial command (e.g. PING, DEMO_ON)...'
+                ? 'Send command (e.g. PING, READ_SENSORS, SET_METAL_THRESHOLD:650)...'
                 : 'Connect Arduino or enable Demo Mode to send commands'
             }
             className="flex-1 min-w-0 px-3 py-1.5 text-xs font-mono bg-[#050811] border border-slate-800 rounded-md text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500/30 disabled:opacity-50"

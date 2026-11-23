@@ -36,14 +36,21 @@ const INITIAL_COUNTS: ChamberCounts = {
 
 const INITIAL_SNAPSHOT: HardwareSnapshot = {
   distanceCm: null,
-  wetDigital: null,
-  wetAnalog: null,
-  metalDetected: false,
+  aiDryActive: null,
+  aiWetActive: null,
+  aiClassification: 'NONE',
+  aiValidity: 'IDLE',
+  metalAdc: null,
+  metalThreshold: 700,
+  metalContact: false,
+  metalLatched: false,
   servo1Angle: 90,
   servo2Angle: 90,
   stage: 'IDLE',
   lastCategory: null,
   lastEventTimestamp: null,
+  lastErrorReason: null,
+  errorCount: 0,
 };
 
 function formatClockTime(): string {
@@ -68,7 +75,7 @@ export default function App() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [baudRate, setBaudRate] = useState<number>(9600);
   const [demoMode, setDemoMode] = useState<boolean>(false);
-  const [showSanitaryChamber, setShowSanitaryChamber] = useState<boolean>(true);
+  const [showSanitaryChamber, setShowSanitaryChamber] = useState<boolean>(false);
 
   const [counts, setCounts] = useState<ChamberCounts>(INITIAL_COUNTS);
   const [snapshot, setSnapshot] = useState<HardwareSnapshot>(INITIAL_SNAPSHOT);
@@ -91,7 +98,7 @@ export default function App() {
   }, [snapshot]);
 
   const appendSerialLog = useCallback(
-    (direction: 'rx' | 'tx' | 'sys', text: string, category?: WasteCategory) => {
+    (direction: 'rx' | 'tx' | 'sys', text: string, category?: WasteCategory | 'ERROR') => {
       const entry: SerialLogEntry = {
         id: makeId(),
         direction,
@@ -120,12 +127,20 @@ export default function App() {
       if (!trimmed) return;
 
       const parsed = parseSerialLine(trimmed, snapshotRef.current);
-      appendSerialLog('rx', trimmed, parsed.eventCategory);
+      appendSerialLog(
+        'rx',
+        trimmed,
+        parsed.isErrorEvent ? 'ERROR' : parsed.eventCategory
+      );
 
       if (parsed.isResetAck) {
         setCounts(INITIAL_COUNTS);
         setEvents([]);
-        setLatestAlertText('Arduino acknowledged counter reset.');
+        setSnapshot((prev) => ({
+          ...INITIAL_SNAPSHOT,
+          metalThreshold: prev.metalThreshold,
+        }));
+        setLatestAlertText('Arduino acknowledged counter and state reset.');
         return;
       }
 
@@ -133,21 +148,71 @@ export default function App() {
         const next: HardwareSnapshot = {
           ...prev,
           distanceCm: parsed.distanceCm !== undefined ? parsed.distanceCm : prev.distanceCm,
-          wetDigital: parsed.wetDigital !== undefined ? parsed.wetDigital : prev.wetDigital,
-          wetAnalog: parsed.wetAnalog !== undefined ? parsed.wetAnalog : prev.wetAnalog,
-          metalDetected:
-            parsed.metalDetected !== undefined ? parsed.metalDetected : prev.metalDetected,
+          aiDryActive: parsed.aiDryActive !== undefined ? parsed.aiDryActive : prev.aiDryActive,
+          aiWetActive: parsed.aiWetActive !== undefined ? parsed.aiWetActive : prev.aiWetActive,
+          aiClassification:
+            parsed.aiClassification !== undefined
+              ? parsed.aiClassification
+              : prev.aiClassification,
+          aiValidity: parsed.aiValidity !== undefined ? parsed.aiValidity : prev.aiValidity,
+          metalAdc: parsed.metalAdc !== undefined ? parsed.metalAdc : prev.metalAdc,
+          metalThreshold:
+            parsed.metalThreshold !== undefined ? parsed.metalThreshold : prev.metalThreshold,
+          metalContact:
+            parsed.metalContact !== undefined ? parsed.metalContact : prev.metalContact,
+          metalLatched:
+            parsed.metalLatched !== undefined ? parsed.metalLatched : prev.metalLatched,
           servo1Angle: parsed.servo1Angle !== undefined ? parsed.servo1Angle : prev.servo1Angle,
           servo2Angle: parsed.servo2Angle !== undefined ? parsed.servo2Angle : prev.servo2Angle,
           stage: parsed.stage !== undefined ? parsed.stage : prev.stage,
         };
 
-        if (parsed.eventCategory) {
+        if (parsed.isErrorEvent) {
+          next.lastErrorReason = parsed.errorReason ?? 'AI_SIGNAL_ERROR';
+          next.errorCount = prev.errorCount + 1;
+        } else if (parsed.eventCategory && !parsed.isTestSource) {
           next.lastCategory = parsed.eventCategory;
           next.lastEventTimestamp = formatClockTime();
+          next.lastErrorReason = null;
         }
         return next;
       });
+
+      if (parsed.isErrorEvent) {
+        const nowStr = formatClockTime();
+        const reasonLabel = parsed.errorReason ?? 'AI_UNKNOWN';
+        const aiCls = parsed.aiClassification ?? snapshotRef.current.aiClassification;
+        const aiVal = parsed.aiValidity ?? snapshotRef.current.aiValidity;
+        const distVal =
+          parsed.distanceCm !== undefined ? parsed.distanceCm : snapshotRef.current.distanceCm;
+        const adcVal =
+          parsed.metalAdc !== undefined ? parsed.metalAdc : snapshotRef.current.metalAdc;
+
+        const errorEvent: SegregationEvent = {
+          id: makeId(),
+          category: 'ERROR',
+          chamberLabel: 'Safe Hold (90°)',
+          resultLabel: `Safe Hold · ${reasonLabel} (No Default to DRY)`,
+          servo1Angle: parsed.servo1Angle ?? 90,
+          servo2Angle: parsed.servo2Angle ?? 90,
+          distanceCm: distVal,
+          aiClassification: aiCls === 'NONE' ? 'UNKNOWN' : aiCls,
+          aiValidity: aiVal === 'IDLE' ? 'UNKNOWN' : aiVal,
+          metalAdc: adcVal,
+          metalDetected: false,
+          timestamp: nowStr,
+          isoTime: new Date().toISOString(),
+          source,
+          rawLine: trimmed,
+        };
+
+        setEvents((prev) => [errorEvent, ...prev.slice(0, 199)]);
+        setErrorBanner(
+          `WitBlox AI signal fault (${reasonLabel}) at ${nowStr}. Servos remained safe at 90° and metal sorting was skipped.`
+        );
+        setLatestAlertText(`AI Signal Error (${reasonLabel}) — safe hold at 90°`);
+        return;
+      }
 
       if (parsed.eventCategory) {
         const cat = parsed.eventCategory;
@@ -155,41 +220,57 @@ export default function App() {
         const s1Angle = parsed.servo1Angle ?? meta.servo1Target;
         const s2Angle = parsed.servo2Angle ?? meta.servo2Target;
         const nowStr = formatClockTime();
+        const isTest = Boolean(parsed.isTestSource);
 
         if (cat === 'SANITARY') {
           setShowSanitaryChamber(true);
         }
 
-        setCounts((prev) => ({
-          ...prev,
-          [cat]: prev[cat] + 1,
-        }));
+        // Physical & demo sorting events increment chamber counters; TX test commands do not
+        if (!isTest) {
+          setCounts((prev) => ({
+            ...prev,
+            [cat]: prev[cat] + 1,
+          }));
+        }
 
         const distVal =
           parsed.distanceCm !== undefined ? parsed.distanceCm : snapshotRef.current.distanceCm;
-        const doVal =
-          parsed.wetDigital !== undefined ? parsed.wetDigital : snapshotRef.current.wetDigital;
-        const aoVal =
-          parsed.wetAnalog !== undefined ? parsed.wetAnalog : snapshotRef.current.wetAnalog;
+        const adcVal =
+          parsed.metalAdc !== undefined ? parsed.metalAdc : snapshotRef.current.metalAdc;
+        const aiCls =
+          parsed.aiClassification ??
+          (cat === 'WET' ? 'WET' : cat === 'SANITARY' ? 'NONE' : 'DRY');
+        const aiVal =
+          parsed.aiValidity ?? (cat === 'SANITARY' ? 'VALID' : 'VALID');
+        const metalFlag =
+          parsed.metalLatched !== undefined ? parsed.metalLatched : cat === 'METAL';
 
         const newEvent: SegregationEvent = {
           id: makeId(),
           category: cat,
           chamberLabel: meta.chamberName,
+          resultLabel: isTest
+            ? `Hardware Test -> ${meta.chamberName} (Counters Unchanged)`
+            : `Segregated -> ${meta.chamberName}`,
           servo1Angle: s1Angle,
           servo2Angle: s2Angle,
           distanceCm: distVal,
-          wetDigital: doVal,
-          wetAnalog: aoVal,
+          aiClassification: aiCls,
+          aiValidity: aiVal,
+          metalAdc: adcVal,
+          metalDetected: metalFlag,
           timestamp: nowStr,
           isoTime: new Date().toISOString(),
-          source,
+          source: isTest ? 'test' : source,
           rawLine: trimmed,
         };
 
         setEvents((prev) => [newEvent, ...prev.slice(0, 199)]);
         setLatestAlertText(
-          `1 ${meta.label} item detected & segregated -> ${meta.chamberName} (S1 ${s1Angle}° · S2 ${s2Angle}°) at ${nowStr}`
+          isTest
+            ? `Hardware Test (${meta.label}) actuated -> S1 ${s1Angle}° · S2 ${s2Angle}° at ${nowStr}`
+            : `1 ${meta.label} item segregated -> ${meta.chamberName} (S1 ${s1Angle}° · S2 ${s2Angle}°) at ${nowStr}`
         );
         triggerFlash(cat);
       }
@@ -199,36 +280,62 @@ export default function App() {
 
   const runSimulatedCycle = useCallback(
     (category: WasteCategory) => {
-      const dist = 4 + Math.floor(Math.random() * 5);
-      const isWet = category === 'WET';
-      const doVal = isWet ? 0 : 1;
-      const aoVal = isWet
-        ? 240 + Math.floor(Math.random() * 110)
-        : 810 + Math.floor(Math.random() * 150);
+      const dist = 5 + Math.floor(Math.random() * 5);
+      const thr = snapshotRef.current.metalThreshold;
       const meta = CATEGORY_META[category];
       const s1 = meta.servo1Target;
       const s2 = meta.servo2Target;
 
       handleIncomingLine(`SENSOR:DIST=${dist}`, 'demo');
+      handleIncomingLine('STAGE:CHECKING_AI', 'demo');
 
       const t1 = window.setTimeout(() => {
-        handleIncomingLine(`LM393 DO: ${doVal} | AO: ${aoVal}`, 'demo');
-        if (category === 'METAL' || category === 'DRY') {
-          handleIncomingLine(`SERVO:S1=${s1}`, 'demo');
+        if (category === 'WET') {
+          handleIncomingLine('AI:DRY=0|WET=1|CLASS=WET|VALID=VALID', 'demo');
+        } else {
+          handleIncomingLine('AI:DRY=1|WET=0|CLASS=DRY|VALID=VALID', 'demo');
+          if (category === 'METAL' || category === 'DRY') {
+            handleIncomingLine(`SERVO:S1=${s1}|S2=90`, 'demo');
+            handleIncomingLine('STAGE:CHECKING_METAL', 'demo');
+          }
         }
-      }, 280);
+      }, 320);
 
       const t2 = window.setTimeout(() => {
-        handleIncomingLine(
-          `EVENT:${category}|DIST:${dist}|DO:${doVal}|AO:${aoVal}|S1:${s1}|S2:${s2}`,
-          'demo'
-        );
-      }, 850);
+        if (category === 'METAL') {
+          const highAdc = Math.min(1020, Math.max(thr + 120, 880 + Math.floor(Math.random() * 110)));
+          handleIncomingLine(`METAL:ADC=${highAdc}|THR=${thr}|CONTACT=1|LATCHED=1`, 'demo');
+          handleIncomingLine(
+            `EVENT:METAL|DIST:${dist}|AI:DRY|VALID:VALID|METAL_ADC:${highAdc}|METAL:1|S1:${s1}|S2:${s2}`,
+            'demo'
+          );
+        } else if (category === 'DRY') {
+          const lowAdc = 25 + Math.floor(Math.random() * 65);
+          handleIncomingLine(`METAL:ADC=${lowAdc}|THR=${thr}|CONTACT=0|LATCHED=0`, 'demo');
+          handleIncomingLine(
+            `EVENT:DRY|DIST:${dist}|AI:DRY|VALID:VALID|METAL_ADC:${lowAdc}|METAL:0|S1:${s1}|S2:${s2}`,
+            'demo'
+          );
+        } else if (category === 'WET') {
+          const lowAdc = 20 + Math.floor(Math.random() * 45);
+          handleIncomingLine(
+            `EVENT:WET|DIST:${dist}|AI:WET|VALID:VALID|METAL_ADC:${lowAdc}|METAL:0|S1:${s1}|S2:${s2}`,
+            'demo'
+          );
+        } else {
+          const lowAdc = 20 + Math.floor(Math.random() * 45);
+          handleIncomingLine(
+            `EVENT:SANITARY|DIST:${dist}|AI:NONE|VALID:VALID|METAL_ADC:${lowAdc}|METAL:0|S1:${s1}|S2:${s2}`,
+            'demo'
+          );
+        }
+      }, 950);
 
       const t3 = window.setTimeout(() => {
         handleIncomingLine('SERVO:HOME:S1=90|S2=90', 'demo');
+        handleIncomingLine('STAGE:IDLE', 'demo');
         handleIncomingLine('Ready for next object...', 'demo');
-      }, 2050);
+      }, 2150);
 
       demoTimersRef.current.push(t1, t2, t3);
     },
@@ -247,14 +354,17 @@ export default function App() {
       : ['METAL', 'DRY', 'WET'];
     let idx = 0;
 
-    appendSerialLog('sys', 'Demo stream started — emitting simulated Arduino events every 3.2s');
+    appendSerialLog(
+      'sys',
+      'Demo stream started — simulating WitBlox AI Vision + Two-Plate Metal cycles every 3.5s'
+    );
     runSimulatedCycle(sequence[idx]);
     idx = (idx + 1) % sequence.length;
 
     const intervalId = window.setInterval(() => {
       runSimulatedCycle(sequence[idx]);
       idx = (idx + 1) % sequence.length;
-    }, 3200);
+    }, 3500);
 
     return () => {
       window.clearInterval(intervalId);
@@ -428,17 +538,42 @@ export default function App() {
       appendSerialLog('tx', clean);
       const upper = clean.toUpperCase();
       if (upper === 'PING') {
-        handleIncomingLine('ACK:PONG|AUTO_BIN_4X', 'demo');
+        handleIncomingLine('ACK:PONG|AUTO_BIN_4X_WITBLOX_A1', 'demo');
+      } else if (upper === 'READ_SENSORS') {
+        const adc = 38 + Math.floor(Math.random() * 25);
+        handleIncomingLine('AI:DRY=0|WET=0|CLASS=UNKNOWN|VALID=IDLE', 'demo');
+        handleIncomingLine(
+          `METAL:ADC=${adc}|THR=${snapshotRef.current.metalThreshold}|CONTACT=0|LATCHED=0`,
+          'demo'
+        );
+      } else if (upper.startsWith('SET_METAL_THRESHOLD:')) {
+        const val = Number.parseInt(upper.slice(20), 10);
+        if (!Number.isNaN(val) && val >= 50 && val <= 1000) {
+          handleIncomingLine(`ACK:THRESHOLD=${val}`, 'demo');
+        }
       } else if (upper === 'TEST_METAL') {
-        runSimulatedCycle('METAL');
+        handleIncomingLine(
+          'EVENT:METAL|DIST:6|AI:DRY|VALID:VALID|METAL_ADC:920|METAL:1|S1:120|S2:150|SOURCE:TEST',
+          'demo'
+        );
       } else if (upper === 'TEST_DRY') {
-        runSimulatedCycle('DRY');
+        handleIncomingLine(
+          'EVENT:DRY|DIST:7|AI:DRY|VALID:VALID|METAL_ADC:80|METAL:0|S1:120|S2:30|SOURCE:TEST',
+          'demo'
+        );
       } else if (upper === 'TEST_WET') {
-        runSimulatedCycle('WET');
+        handleIncomingLine(
+          'EVENT:WET|DIST:6|AI:WET|VALID:VALID|METAL_ADC:35|METAL:0|S1:30|S2:90|SOURCE:TEST',
+          'demo'
+        );
       } else if (upper === 'TEST_SANITARY') {
-        runSimulatedCycle('SANITARY');
+        handleIncomingLine(
+          'EVENT:SANITARY|DIST:6|AI:NONE|VALID:VALID|METAL_ADC:35|METAL:0|S1:60|S2:90|SOURCE:TEST',
+          'demo'
+        );
       } else if (upper === 'HOME') {
         handleIncomingLine('SERVO:HOME:S1=90|S2=90', 'demo');
+        handleIncomingLine('STAGE:IDLE', 'demo');
       } else if (upper === 'RESET') {
         handleIncomingLine('ACK:RESET', 'demo');
       } else {
@@ -447,17 +582,39 @@ export default function App() {
     }
   };
 
+  const handleApplyMetalThreshold = (threshold: number) => {
+    const clamped = Math.max(50, Math.min(1000, Math.round(threshold)));
+    setSnapshot((prev) => ({
+      ...prev,
+      metalThreshold: clamped,
+      metalContact: prev.metalAdc !== null ? prev.metalAdc >= clamped : prev.metalContact,
+    }));
+    setLatestAlertText(`Metal A1 threshold set to ${clamped} / 1023.`);
+
+    if (connectionState === 'connected' || demoMode) {
+      void handleSendSerialCommand(`SET_METAL_THRESHOLD:${clamped}`);
+    } else {
+      appendSerialLog(
+        'sys',
+        `Local metal threshold updated to ${clamped} (connect Arduino to sync via SET_METAL_THRESHOLD:${clamped})`
+      );
+    }
+  };
+
+  const handleRequestSensorRead = () => {
+    if (connectionState === 'connected' || demoMode) {
+      void handleSendSerialCommand('READ_SENSORS');
+    }
+  };
+
   const handleResetCounters = () => {
     setCounts(INITIAL_COUNTS);
     setEvents([]);
     setLatestAlertText(null);
+    setErrorBanner(null);
     setSnapshot((prev) => ({
-      ...prev,
-      lastCategory: null,
-      lastEventTimestamp: null,
-      servo1Angle: 90,
-      servo2Angle: 90,
-      stage: 'IDLE',
+      ...INITIAL_SNAPSHOT,
+      metalThreshold: prev.metalThreshold,
     }));
     appendSerialLog('sys', 'Counters and activity log reset.');
     if (connectionState === 'connected') {
@@ -468,17 +625,20 @@ export default function App() {
   const handleExportCsv = () => {
     if (events.length === 0) return;
     const header =
-      'Time,Category,Chamber,Servo1AngleDeg,Servo2AngleDeg,DistanceCm,MoistureDO,MoistureAO,Source';
+      'Time,Result,Category,Chamber,DistanceCm,AiClassification,AiValidity,MetalAdc,MetalDetected,Servo1AngleDeg,Servo2AngleDeg,Source';
     const rows = events.map((ev) =>
       [
         ev.timestamp,
+        `"${ev.resultLabel.replace(/"/g, '""')}"`,
         ev.category,
         ev.chamberLabel,
+        ev.distanceCm ?? '',
+        ev.aiClassification,
+        ev.aiValidity,
+        ev.metalAdc ?? '',
+        ev.metalDetected ? '1' : '0',
         ev.servo1Angle,
         ev.servo2Angle,
-        ev.distanceCm ?? '',
-        ev.wetDigital ?? '',
-        ev.wetAnalog ?? '',
         ev.source,
       ].join(',')
     );
@@ -637,7 +797,7 @@ export default function App() {
                     : 'Disconnected'}
                 </span>
                 <span className="text-xs text-slate-400 font-mono truncate">
-                  {demoMode ? 'Simulated 9600 baud telemetry stream' : connectionMessage}
+                  {demoMode ? 'Simulated 9600 baud WitBlox AI + Metal A1 stream' : connectionMessage}
                 </span>
               </div>
 
@@ -739,6 +899,10 @@ export default function App() {
             <HardwareVisualizer
               snapshot={snapshot}
               showSanitaryChamber={showSanitaryChamber}
+              connectionState={connectionState}
+              demoMode={demoMode}
+              onApplyMetalThreshold={handleApplyMetalThreshold}
+              onRequestSensorRead={handleRequestSensorRead}
             />
 
             {/* Live Segregation Log & Raw Serial Console */}

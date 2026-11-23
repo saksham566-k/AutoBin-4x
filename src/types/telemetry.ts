@@ -1,13 +1,18 @@
 export type WasteCategory = 'METAL' | 'DRY' | 'WET' | 'SANITARY';
 
+export type AiClassification = 'NONE' | 'DRY' | 'WET' | 'UNKNOWN' | 'CONFLICT';
+
+export type AiValidity = 'IDLE' | 'VALID' | 'UNKNOWN' | 'CONFLICT';
+
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 export type SortStage =
   | 'IDLE'
   | 'OBJECT_DETECTED'
-  | 'CHECKING_MOISTURE'
+  | 'CHECKING_AI'
   | 'CHECKING_METAL'
   | 'SORTING'
+  | 'AI_ERROR'
   | 'RETURNING_HOME';
 
 export interface ChamberCounts {
@@ -19,16 +24,19 @@ export interface ChamberCounts {
 
 export interface SegregationEvent {
   id: string;
-  category: WasteCategory;
+  category: WasteCategory | 'ERROR';
   chamberLabel: string;
+  resultLabel: string;
   servo1Angle: number;
   servo2Angle: number;
   distanceCm: number | null;
-  wetDigital: number | null;
-  wetAnalog: number | null;
+  aiClassification: AiClassification;
+  aiValidity: AiValidity;
+  metalAdc: number | null;
+  metalDetected: boolean;
   timestamp: string;
   isoTime: string;
-  source: 'arduino' | 'demo';
+  source: 'arduino' | 'demo' | 'test';
   rawLine: string;
 }
 
@@ -37,19 +45,26 @@ export interface SerialLogEntry {
   direction: 'rx' | 'tx' | 'sys';
   text: string;
   timestamp: string;
-  category?: WasteCategory;
+  category?: WasteCategory | 'ERROR';
 }
 
 export interface HardwareSnapshot {
   distanceCm: number | null;
-  wetDigital: number | null;
-  wetAnalog: number | null;
-  metalDetected: boolean;
+  aiDryActive: boolean | null;
+  aiWetActive: boolean | null;
+  aiClassification: AiClassification;
+  aiValidity: AiValidity;
+  metalAdc: number | null;
+  metalThreshold: number;
+  metalContact: boolean;
+  metalLatched: boolean;
   servo1Angle: number; // Pin D9: Wet / Dry Stage
-  servo2Angle: number; // Pin D10: Metal / Non-Metal Stage
+  servo2Angle: number; // Pin D10: Metal / Dry Stage
   stage: SortStage;
   lastCategory: WasteCategory | null;
   lastEventTimestamp: string | null;
+  lastErrorReason: string | null;
+  errorCount: number;
 }
 
 export interface CategoryMeta {
@@ -76,7 +91,7 @@ export const CATEGORY_META: Record<WasteCategory, CategoryMeta> = {
     servo1Target: 120,
     servo2Target: 150,
     routeLabel: 'S1 120° · S2 150°',
-    description: 'Dry pass on Servo 1 + metal divert on Servo 2',
+    description: 'WitBlox AI DRY + two-plate A1 metal bridge',
     accentText: 'text-amber-400',
     accentBg: 'bg-amber-500/10',
     accentBorder: 'border-amber-400/50',
@@ -91,7 +106,7 @@ export const CATEGORY_META: Record<WasteCategory, CategoryMeta> = {
     servo1Target: 120,
     servo2Target: 30,
     routeLabel: 'S1 120° · S2 30°',
-    description: 'Dry pass on Servo 1 + non-metal divert on Servo 2',
+    description: 'WitBlox AI DRY + no metal plate bridge',
     accentText: 'text-emerald-400',
     accentBg: 'bg-emerald-500/10',
     accentBorder: 'border-emerald-400/50',
@@ -106,7 +121,7 @@ export const CATEGORY_META: Record<WasteCategory, CategoryMeta> = {
     servo1Target: 30,
     servo2Target: 90,
     routeLabel: 'S1 30° · S2 90°',
-    description: 'LM393 moisture active state on Servo 1',
+    description: 'WitBlox AI WET signal on Servo 1 (skips metal)',
     accentText: 'text-sky-400',
     accentBg: 'bg-sky-500/10',
     accentBorder: 'border-sky-400/50',
@@ -121,7 +136,7 @@ export const CATEGORY_META: Record<WasteCategory, CategoryMeta> = {
     servo1Target: 60,
     servo2Target: 90,
     routeLabel: 'S1 60° · S2 90°',
-    description: '4-way sanitary chute on Servo 1',
+    description: 'Optional 4-way sanitary chute on Servo 1',
     accentText: 'text-violet-400',
     accentBg: 'bg-violet-500/10',
     accentBorder: 'border-violet-400/50',

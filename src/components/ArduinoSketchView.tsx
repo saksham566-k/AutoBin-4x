@@ -53,14 +53,46 @@ export const ArduinoSketchView: React.FC = () => {
   };
 
   const pinMappings = [
-    { component: 'HC-SR04 Ultrasonic (Trig)', pin: 'D6', notes: 'Trigger pulse (10 µs)' },
-    { component: 'HC-SR04 Ultrasonic (Echo)', pin: 'D7', notes: '30 ms echo timeout (~10 cm threshold)' },
-    { component: 'LM393 Moisture (Digital DO)', pin: 'D4', notes: 'Active LOW when wet (configurable)' },
-    { component: 'LM393 Moisture (Analog AO)', pin: 'A0', notes: '0–1023 analog moisture telemetry' },
-    { component: 'Metal Touch Sensor', pin: 'D2', notes: 'Active HIGH after 2s settle wait' },
-    { component: 'Servo 1: Wet / Dry Chute', pin: 'D9', notes: '30° Wet · 60° Sanitary · 90° Home · 120° Dry Pass' },
-    { component: 'Servo 2: Metal / Dry Chute', pin: 'D10', notes: '30° Dry (Non-Metal) · 90° Home · 150° Metal' },
-    { component: 'Optional 4-Way Sanitary Input', pin: 'D5', notes: 'Enable ENABLE_4WAY_SANITARY = true to activate' },
+    {
+      component: 'WitBlox AI Vision · DRY Output',
+      pin: 'D4',
+      notes: 'AI_DRY_PIN (configurable polarity; verify voltage compatibility before wiring)',
+    },
+    {
+      component: 'WitBlox AI Vision · WET Output',
+      pin: 'D5',
+      notes: 'AI_WET_PIN (configurable polarity; verify voltage compatibility before wiring)',
+    },
+    {
+      component: 'Two-Plate Metal Contact Input',
+      pin: 'A1',
+      notes: '5V -> 1 kΩ -> Plate A | Plate B -> A1 | 10 kΩ pull-down to GND (threshold 700)',
+    },
+    {
+      component: 'HC-SR04 Ultrasonic (Trig)',
+      pin: 'D6',
+      notes: '10 µs trigger pulse',
+    },
+    {
+      component: 'HC-SR04 Ultrasonic (Echo)',
+      pin: 'D7',
+      notes: '3-ping median filter, 4–12 cm trigger, 3 confirmations',
+    },
+    {
+      component: 'Servo 1: Wet / Dry Diverter',
+      pin: 'D9',
+      notes: '30° Wet · 60° Sanitary (opt.) · 90° Home · 120° Dry Pass',
+    },
+    {
+      component: 'Servo 2: Metal / Dry Diverter',
+      pin: 'D10',
+      notes: '30° Dry (Non-Metal) · 90° Home · 150° Metal',
+    },
+    {
+      component: 'Optional 4-Way Sanitary Input',
+      pin: 'D8',
+      notes: 'Disabled by default (ENABLE_4WAY_SANITARY = false)',
+    },
   ];
 
   return (
@@ -75,19 +107,15 @@ export const ArduinoSketchView: React.FC = () => {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-2xl">
             <h1 className="text-xl font-bold text-white tracking-tight">
-              Upgraded Arduino Uno Telemetry Sketch
+              WitBlox AI + Two-Plate Metal Arduino Firmware
             </h1>
             <p className="mt-1.5 text-sm text-slate-300 leading-relaxed">
-              Built directly from your original sensor & servo code. It preserves every pin
-              definition, timing delay, and sorting angle while adding structured{' '}
-              <code className="font-mono text-xs bg-slate-800 text-sky-300 px-1.5 py-0.5 rounded">
-                EVENT:&lt;CATEGORY&gt;
-              </code>{' '}
-              packets at 9600 baud and remote test commands (<code className="font-mono text-xs text-slate-200">PING</code>,{' '}
-              <code className="font-mono text-xs text-slate-200">TEST_METAL</code>,{' '}
-              <code className="font-mono text-xs text-slate-200">DEMO_ON</code>). This dashboard also parses your
-              original unmodified <code className="font-mono text-xs text-slate-200">Action: ...</code> serial
-              lines automatically.
+              State-machine firmware for Arduino Uno at 9600 baud. Reads WitBlox AI Vision outputs
+              on <code className="font-mono text-xs text-sky-300">D4</code> /{' '}
+              <code className="font-mono text-xs text-sky-300">D5</code> with stability + timeout
+              checks (never defaulting UNKNOWN/CONFLICT to DRY), monitors the protected metal plates on{' '}
+              <code className="font-mono text-xs text-amber-300">A1</code> with median filtering and
+              cycle latching, and emits structured telemetry packets.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -96,7 +124,11 @@ export const ArduinoSketchView: React.FC = () => {
               onClick={handleCopySketch}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-200 bg-slate-800/80 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              {copiedSketch ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              {copiedSketch ? (
+                <Check className="w-3.5 h-3.5 text-emerald-400" />
+              ) : (
+                <Copy className="w-3.5 h-3.5" />
+              )}
               {copiedSketch ? 'Copied Sketch' : 'Copy Sketch'}
             </button>
             <button
@@ -141,7 +173,9 @@ export const ArduinoSketchView: React.FC = () => {
                 {pinMappings.map((row) => (
                   <tr key={row.component}>
                     <td className="py-2.5 pr-4 font-medium text-slate-100">{row.component}</td>
-                    <td className="py-2.5 pr-4 font-mono text-sky-400">{row.pin}</td>
+                    <td className="py-2.5 pr-4 font-mono text-sky-400 whitespace-nowrap">
+                      {row.pin}
+                    </td>
                     <td className="py-2.5 text-slate-400">{row.notes}</td>
                   </tr>
                 ))}
@@ -159,13 +193,15 @@ export const ArduinoSketchView: React.FC = () => {
               </h2>
             </div>
             <p className="mt-2 text-sm text-slate-300 leading-relaxed">
-              Need an offline, self-contained single-file <code className="font-mono text-xs text-sky-300">.html</code>{' '}
-              version with embedded CSS, JavaScript, Web Serial API, and Demo Mode? Download or copy it
-              to run locally in Chrome or Edge.
+              Self-contained offline <code className="font-mono text-xs text-sky-300">.html</code>{' '}
+              dashboard with embedded CSS, JavaScript, Web Serial API, WitBlox AI status, A1 metal
+              calibration, and Demo Mode.
             </p>
             <div className="mt-4 p-3 bg-[#050811] border border-slate-800 rounded-md text-xs font-mono text-slate-400 space-y-1">
-              <div>Supports: EVENT:METAL · EVENT:DRY · EVENT:WET · EVENT:SANITARY</div>
-              <div>Also parses: Action: WET / NOT WET + METAL / NO METAL</div>
+              <div>AI:DRY=1|WET=0|CLASS=DRY|VALID=VALID</div>
+              <div>METAL:ADC=920|THR=700|CONTACT=1|LATCHED=1</div>
+              <div>EVENT:METAL|DIST:7|AI:DRY|METAL_ADC:920|S1:120|S2:150</div>
+              <div>EVENT:ERROR|REASON:AI_UNKNOWN|S1:90|S2:90</div>
             </div>
           </div>
 
@@ -183,7 +219,11 @@ export const ArduinoSketchView: React.FC = () => {
               onClick={handleCopyStandaloneHtml}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-200 bg-slate-800/80 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              {copiedHtml ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              {copiedHtml ? (
+                <Check className="w-3.5 h-3.5 text-emerald-400" />
+              ) : (
+                <Copy className="w-3.5 h-3.5" />
+              )}
               {copiedHtml ? 'Copied HTML' : 'Copy HTML Source'}
             </button>
           </div>
